@@ -9,6 +9,8 @@ workflows:
     scripts:
       - name: Install XcodeGen
         script: brew install xcodegen
+      - name: Install Metal Toolchain
+        script: xcodebuild -downloadComponent MetalToolchain
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
       - name: Build iOS Simulator app
