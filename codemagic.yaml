@@ -1,0 +1,17 @@
+workflows:
+  mai-lens-ios:
+    name: MaiLens iOS simulator build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate --spec project.yml
+      - name: Build iOS Simulator app
+        script: xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS Simulator' -sdk iphonesimulator -configuration Debug -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO
+    artifacts:
+      - build/DerivedData/Build/Products/Debug-iphonesimulator/MaiLens.app
