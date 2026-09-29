@@ -11,6 +11,8 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     GENERATE_INFOPLIST_FILE: "YES"
     INFOPLIST_KEY_NSCameraUsageDescription: "使用后置 0.5× 摄像头实时预览并矫正外接鱼眼镜头画面。"
+    INFOPLIST_KEY_NSMicrophoneUsageDescription: "录制稳定后的视频时录入机台音乐和现场声音。"
+    INFOPLIST_KEY_NSMotionUsageDescription: "使用设备运动传感器检测手机倾斜，并稳定录像中的地平线。"
     INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
     INFOPLIST_KEY_UIUserInterfaceStyle: Dark
 targets:

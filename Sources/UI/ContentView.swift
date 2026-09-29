@@ -4,6 +4,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
     @StateObject private var autoLock = MachineAutoLockController()
+    @StateObject private var horizonLock = HorizonLockController()
+    @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
     @State private var sharedProfile: LensProfileFile?
 
@@ -16,6 +18,7 @@ struct ContentView: View {
                     header
                     cameraPreview
                     autoLockControls
+                    recordingControls
                     correctionControls
                     calibrationNote
                 }
@@ -33,8 +36,13 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 camera.start()
+                horizonLock.start()
             } else {
                 camera.stop()
+                horizonLock.stop()
+                if recorder.isRecording {
+                    recorder.stop { camera.stopAudioCapture() }
+                }
             }
         }
     }
@@ -79,7 +87,7 @@ struct ContentView: View {
             }
 
             ZStack {
-                FisheyeCameraPreview(camera: camera, autoLock: autoLock, settings: settings)
+                FisheyeCameraPreview(camera: camera, autoLock: autoLock, horizonLock: horizonLock, recorder: recorder, settings: settings)
                     .aspectRatio(9.0 / 16.0, contentMode: .fit)
 
                 if let message = camera.errorMessage {
@@ -118,6 +126,17 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("切换鱼眼矫正")
                 .padding(12)
+            }
+            .overlay(alignment: .topLeading) {
+                if recorder.isRecording {
+                    Label("REC", systemImage: "record.circle.fill")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(.red.opacity(0.88), in: Capsule())
+                        .padding(12)
+                }
             }
 
             Text(camera.cameraName)
@@ -158,6 +177,73 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(PrimaryActionStyle())
+
+            Button {
+                horizonLock.toggle()
+            } label: {
+                Label(horizonLock.isEnabled ? "地平线稳定已开启" : "开启地平线稳定", systemImage: horizonLock.isEnabled ? "level.fill" : "level")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryActionStyle())
+            .disabled(horizonLock.errorMessage != nil)
+        }
+        .padding(17)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var recordingControls: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("处理后录像")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("把鱼眼矫正、机台锁定和地平线稳定后的画面与现场声音保存为竖屏 MP4。麦克风只在录制时启用。")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Button {
+                if recorder.isRecording {
+                    recorder.stop { camera.stopAudioCapture() }
+                } else if !recorder.isFinishing {
+                    camera.prepareAudioForRecording { hasAudio in
+                        recorder.start(includeAudio: hasAudio) { started in
+                            if !started { camera.stopAudioCapture() }
+                        }
+                    }
+                }
+            } label: {
+                Label(
+                    recorder.isFinishing ? "正在保存录像…" : (recorder.isRecording ? "停止并保存" : "开始录制稳定画面"),
+                    systemImage: recorder.isRecording ? "stop.fill" : "record.circle"
+                )
+                .font(.system(size: 13, weight: .bold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(recorder.isRecording ? Color.red : Color.mint, in: RoundedRectangle(cornerRadius: 13))
+                .foregroundStyle(recorder.isRecording ? Color.white : Color.black)
+            }
+            .disabled(recorder.isFinishing || !camera.isRunning)
+
+            if let savedURL = recorder.savedURL {
+                ShareLink(item: savedURL) {
+                    Label("分享或存入相册", systemImage: "square.and.arrow.up")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionStyle())
+            }
+
+            if let errorMessage = recorder.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.orange)
+            }
+            if let audioWarning = camera.audioWarning {
+                Text(audioWarning)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.orange)
+            }
         }
         .padding(17)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
@@ -179,7 +265,7 @@ struct ContentView: View {
                     Text("手动校正")
                         .font(.system(size: 19, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("移动手机或棋盘，调到直线看起来笔直")
+                    Text("对照预览里的直线微调，设置会自动保存在本机")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.48))
                 }
@@ -255,7 +341,7 @@ private struct ShareProfileSheet: View {
                 .foregroundStyle(Color.mint)
             Text("鱼眼校正参数已准备好")
                 .font(.system(size: 18, weight: .bold))
-            Text("导出 JSON 可备份配置，后续也能把手动调好的标定值接入稳定算法。")
+            Text("导出 JSON 可备份当前镜头参数，换设备或重装后也能恢复。")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

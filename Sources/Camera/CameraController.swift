@@ -2,19 +2,64 @@ import AVFoundation
 import Combine
 import CoreVideo
 import Foundation
+import CoreMedia
 
 final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var cameraName = "等待摄像头"
     @Published private(set) var errorMessage: String?
+    @Published private(set) var audioWarning: String?
 
     let session = AVCaptureSession()
-    var onFrame: ((CVPixelBuffer) -> Void)?
+    var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    var onAudioSample: ((CMSampleBuffer) -> Void)?
 
     private let sessionQueue = DispatchQueue(label: "com.mailens.camera-session")
     private let outputQueue = DispatchQueue(label: "com.mailens.camera-frames", qos: .userInitiated)
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
+    private let audioOutputQueue = DispatchQueue(label: "com.mailens.camera-audio", qos: .userInitiated)
     private var isConfigured = false
+    private var isAudioConfigured = false
+    private var audioInput: AVCaptureDeviceInput?
+
+    func prepareAudioForRecording(completion: @escaping (Bool) -> Void) {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            configureAudioInput(completion: completion)
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                guard let self else { return }
+                if granted {
+                    self.configureAudioInput(completion: completion)
+                } else {
+                    DispatchQueue.main.async {
+                        self.audioWarning = "麦克风权限未开启，录像将不含声音。"
+                        completion(false)
+                    }
+                }
+            }
+        case .denied, .restricted:
+            audioWarning = "麦克风权限未开启，录像将不含声音。"
+            completion(false)
+        @unknown default:
+            audioWarning = "无法使用麦克风，录像将不含声音。"
+            completion(false)
+        }
+    }
+
+    func stopAudioCapture() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.isAudioConfigured else { return }
+            self.audioOutput.setSampleBufferDelegate(nil, queue: nil)
+            self.session.beginConfiguration()
+            if self.session.outputs.contains(self.audioOutput) { self.session.removeOutput(self.audioOutput) }
+            if let input = self.audioInput { self.session.removeInput(input) }
+            self.session.commitConfiguration()
+            self.audioInput = nil
+            self.isAudioConfigured = false
+        }
+    }
 
     func start() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -64,6 +109,50 @@ final class CameraController: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.errorMessage = error.localizedDescription
                     self.isRunning = false
+                }
+            }
+        }
+    }
+
+    private func configureAudioInput(completion: @escaping (Bool) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.isAudioConfigured {
+                DispatchQueue.main.async { completion(true) }
+                return
+            }
+            guard let microphone = AVCaptureDevice.default(for: .audio) else {
+                DispatchQueue.main.async {
+                    self.audioWarning = "未找到麦克风，录像将不含声音。"
+                    completion(false)
+                }
+                return
+            }
+
+            do {
+                let input = try AVCaptureDeviceInput(device: microphone)
+                self.session.beginConfiguration()
+                defer { self.session.commitConfiguration() }
+                guard self.session.canAddInput(input), self.session.canAddOutput(self.audioOutput) else {
+                    DispatchQueue.main.async {
+                        self.audioWarning = "无法连接麦克风，录像将不含声音。"
+                        completion(false)
+                    }
+                    return
+                }
+                self.session.addInput(input)
+                self.audioOutput.setSampleBufferDelegate(self, queue: self.audioOutputQueue)
+                self.session.addOutput(self.audioOutput)
+                self.audioInput = input
+                self.isAudioConfigured = true
+                DispatchQueue.main.async {
+                    self.audioWarning = nil
+                    completion(true)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.audioWarning = "无法启动麦克风：\(error.localizedDescription)"
+                    completion(false)
                 }
             }
         }
@@ -123,9 +212,13 @@ final class CameraController: NSObject, ObservableObject {
     }
 }
 
-extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
+extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        onFrame?(pixelBuffer)
+        if output === videoOutput {
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            onFrame?(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        } else if output === audioOutput {
+            onAudioSample?(sampleBuffer)
+        }
     }
 }

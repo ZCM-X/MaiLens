@@ -50,6 +50,7 @@ final class MachineAutoLockController: ObservableObject {
     private var smoothedZoom: CGFloat = 1
     private var lastVisionBox: CGRect?
     private var lastStatus: MachineLockStatus = .searching
+    private var horizonRadians: CGFloat = 0
 
     func updateSettings(_ value: LensCorrectionSettings) {
         visionQueue.async { [weak self] in self?.settings = value }
@@ -58,6 +59,10 @@ final class MachineAutoLockController: ObservableObject {
     func updatePreviewSize(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         visionQueue.async { [weak self] in self?.displaySize = size }
+    }
+
+    func updateHorizonAngle(_ angle: CGFloat) {
+        visionQueue.async { [weak self] in self?.horizonRadians = angle }
     }
 
     func toggle() {
@@ -206,7 +211,11 @@ final class MachineAutoLockController: ObservableObject {
         let targetSize = max(width, height * displaySize.height / displaySize.width)
         // Keep the screen comfortably inside frame; allow a little zoom-out
         // when the machine moves closer, bounded to avoid extreme lens edges.
-        let desiredZoom = min(max(0.74 / max(targetSize, 0.08), 0.78), 2.6)
+        let aspect = displaySize.width / max(displaySize.height, 1)
+        let cosine = abs(cos(horizonRadians))
+        let sine = abs(sin(horizonRadians))
+        let horizonFillZoom = max(cosine + sine / max(aspect, 0.01), cosine + sine * aspect)
+        let desiredZoom = min(max(0.74 / (max(targetSize, 0.08) * horizonFillZoom), 0.78), 2.6)
 
         let centerAlpha: CGFloat = 0.24
         let zoomAlpha: CGFloat = 0.12

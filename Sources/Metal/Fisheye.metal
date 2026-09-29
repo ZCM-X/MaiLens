@@ -12,6 +12,7 @@ struct FisheyeUniforms {
     float2 centerNormalized;
     float2 cropCenterNormalized;
     float cropZoom;
+    float horizonRadians;
     float focalX;
     float focalY;
     float horizontalFOVRadians;
@@ -38,7 +39,16 @@ fragment float4 fisheyeFragment(
     sampler linearSampler [[sampler(0)]],
     constant FisheyeUniforms& u [[buffer(0)]]) {
 
-    float2 rectifiedUV = u.cropCenterNormalized + (in.uv - 0.5) / max(u.cropZoom, 0.01);
+    float2 centeredPixels = (in.uv - 0.5) * u.destinationSize;
+    float sine = sin(u.horizonRadians);
+    float cosine = cos(u.horizonRadians);
+    float2 rotatedPixels = float2(
+        cosine * centeredPixels.x - sine * centeredPixels.y,
+        sine * centeredPixels.x + cosine * centeredPixels.y
+    );
+    float aspect = u.destinationSize.x / max(u.destinationSize.y, 1.0);
+    float horizonFillZoom = max(abs(cosine) + abs(sine) / max(aspect, 0.01), abs(cosine) + abs(sine) * aspect);
+    float2 rectifiedUV = u.cropCenterNormalized + rotatedPixels / u.destinationSize / max(u.cropZoom * horizonFillZoom, 0.01);
 
     if (u.correctionEnabled < 0.5) {
         if (any(rectifiedUV < 0.0) || any(rectifiedUV > 1.0)) {

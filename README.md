@@ -10,8 +10,10 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 - Automatic machine lock: Vision searches for a large, near-circular display contour, tracks it between detections, maps its center and size into the corrected preview, and smoothly adjusts the Metal crop. The UI reports searching, tracking, and temporary loss states. There is no manual target box.
+- Horizon leveling: CoreMotion gravity measurements rotate the preview and compensate the crop to keep the horizon level.
+- Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
-The first automatic-lock detector is a geometric circular-contour heuristic, tuned for the round game-machine display in the supplied example. It is not a trained semantic model and may select a different round object or lose the machine when the display is obscured. This first pass adjusts the live preview only; horizon lock, recording, and streaming are not implemented yet.
+The first automatic-lock detector is a geometric circular-contour heuristic, tuned for the round game-machine display in the supplied example. It is not a trained semantic model and may select a different round object or lose the machine when the display is obscured. Live streaming remains to be added.
 
 ## Calibration note
 
