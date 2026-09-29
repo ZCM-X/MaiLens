@@ -185,10 +185,10 @@ struct ContentView: View {
                 .foregroundStyle(Color.mint)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 4) {
-                Text("棋盘预校准参数")
+                Text("机台实拍配置")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
-                Text("当前预设来自 7 张识别成功的棋盘照片，中心区误差约 1.61 px。边缘还需补拍标定；调好的参数会自动保存在本机。")
+                Text("输出视场角 106.46° 来自你发来的机台实拍参数；镜头中心和 K1/K2 沿用棋盘预校准。鱼眼边缘仍需补拍验证，修改会自动保存在本机。")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(.white.opacity(0.52))
                     .fixedSize(horizontal: false, vertical: true)

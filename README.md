@@ -7,14 +7,14 @@ MaiLens is an iPhone app starter for manually tuning a clip-on fisheye lens on t
 - Live 1080p preview from the iPhone rear ultra-wide camera. The app requests camera permission at launch.
 - Metal inverse mapping for the OpenCV fisheye angle model: `theta_d = theta * (1 + k1*theta^2 + k2*theta^4)`.
 - Manual controls for lens center X/Y, `k1`, `k2`, output horizontal field of view, and an on/off correction switch.
-- A preliminary preset seeded from the checkerboard photos in `C:\Users\93543\Downloads\qipan` and local persistence of the tuned profile.
+- A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 
 The app intentionally does not yet include machine tracking, horizon lock, video recording, or live streaming. Those should build on a validated lens profile and the corrected camera frame path in this starter.
 
 ## Calibration note
 
-The seed profile detected 7 of 8 checkerboard images at 4032×3024 with 9×6 inner corners and reported 1.61 px overall reprojection RMS. The detected corners cover only the middle of the images. That is enough to initialize the manual controls, not to claim an accurate correction near the outer edge of the external fisheye lens. Capture more checkerboard views around the usable image circle and validate against the app's actual 0.5× video frames before relying on edge geometry.
+The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON. Its lens center and radial coefficients come from the preliminary checkerboard calibration: 7 of 8 images detected at 4032×3024, with 1.61 px overall reprojection RMS. The detected corners cover only the middle of the images, so this does not establish edge accuracy for the external fisheye. Capture more checkerboard views around the usable image circle and validate against the app's actual 0.5× video frames before relying on edge geometry.
 
 ## Build on CodeMagic
 

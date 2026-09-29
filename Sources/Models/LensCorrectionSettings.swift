@@ -11,18 +11,23 @@ struct LensCorrectionSettings: Codable, Equatable {
 
     static let storageKey = "maiLens.lensCorrectionSettings.v1"
 
-    /// Initialized from the user's preliminary checkerboard calibration. The
-    /// source images do not cover the outer image circle, so these are a seed,
-    /// not a validated final lens profile.
-    static let preliminary = LensCorrectionSettings(
+    /// The machine-shot profile supplies the output FOV. The lens center and
+    /// radial coefficients remain the user's preliminary checkerboard fit.
+    static let preliminary: LensCorrectionSettings = loadBundledProfile() ?? LensCorrectionSettings(
         profileName: "iPhone 15 Pro Max · 外夹鱼眼 · 棋盘预校准",
         centerX: 2023.0716 / 4032.0,
         centerY: 1510.2571 / 3024.0,
         k1: 0.0893163,
         k2: -0.0174637,
-        horizontalFOV: 110,
+        horizontalFOV: 106.45833432674408,
         correctionEnabled: true
     )
+
+    private static func loadBundledProfile() -> LensCorrectionSettings? {
+        guard let url = Bundle.main.url(forResource: "MaiLens-Lens-Profile", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(LensCorrectionSettings.self, from: data)
+    }
 
     static func load() -> LensCorrectionSettings {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
