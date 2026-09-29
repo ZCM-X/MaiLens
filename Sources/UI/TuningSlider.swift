@@ -24,7 +24,7 @@ struct TuningSlider: View {
     }
 }
 
-private struct PrimaryActionStyle: ButtonStyle {
+struct PrimaryActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .bold))
@@ -35,7 +35,7 @@ private struct PrimaryActionStyle: ButtonStyle {
     }
 }
 
-private struct SecondaryActionStyle: ButtonStyle {
+struct SecondaryActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .bold))
