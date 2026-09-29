@@ -1,6 +1,6 @@
 workflows:
   mai-lens-ios:
-    name: MaiLens iOS simulator build
+    name: MaiLens unsigned iOS IPA
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
@@ -13,7 +13,13 @@ workflows:
         script: xcodebuild -downloadComponent MetalToolchain
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
-      - name: Build iOS Simulator app
-        script: xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS Simulator' -sdk iphonesimulator -configuration Debug -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO
+      - name: Archive unsigned iOS app
+        script: xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS' -configuration Release -archivePath build/MaiLens.xcarchive -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO archive
+      - name: Package unsigned IPA
+        script: |
+          mkdir -p build/ios/ipa/staging/Payload
+          cp -R build/MaiLens.xcarchive/Products/Applications/MaiLens.app build/ios/ipa/staging/Payload/
+          cd build/ios/ipa/staging
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload ../MaiLens-unsigned.ipa
     artifacts:
-      - build/DerivedData/Build/Products/Debug-iphonesimulator/MaiLens.app
+      - build/ios/ipa/MaiLens-unsigned.ipa

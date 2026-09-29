@@ -20,6 +20,8 @@ The seed profile detected 7 of 8 checkerboard images at 4032×3024 with 9×6 inn
 
 1. Push this `MaiLens` directory to a GitHub repository (or use it as the repository root).
 2. Add the repository in CodeMagic and select the `mai-lens-ios` workflow.
-3. The workflow installs XcodeGen, generates `MaiLens.xcodeproj` from `project.yml`, and builds an unsigned simulator app. It does not require Apple signing credentials for this validation build.
+3. The workflow installs XcodeGen and the Metal toolchain, generates `MaiLens.xcodeproj` from `project.yml`, archives for a generic iOS device, and packages `MaiLens-unsigned.ipa` as a CodeMagic artifact. It does not require Apple signing credentials.
 
-To build locally, use a Mac with Xcode and XcodeGen installed, then run `xcodegen generate --spec project.yml` followed by an iOS Simulator build in Xcode.
+The IPA is unsigned and cannot be installed as-is. Sign it with your third-party signing tool and a matching provisioning profile before installing it on an iPhone.
+
+To build locally, use a Mac with Xcode and XcodeGen installed, then run `xcodegen generate --spec project.yml` followed by `xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS' -configuration Release -archivePath build/MaiLens.xcarchive CODE_SIGNING_ALLOWED=NO archive`. Package the resulting `MaiLens.xcarchive/Products/Applications/MaiLens.app` under a top-level `Payload/` folder in a ZIP archive and name it `MaiLens-unsigned.ipa`.
