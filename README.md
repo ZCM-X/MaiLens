@@ -1,6 +1,6 @@
 # MaiLens
 
-MaiLens is an iPhone app starter for manually tuning a clip-on fisheye lens on the iPhone 15 Pro Max 0.5× camera. It captures the rear ultra-wide camera, previews an angle-polynomial fisheye correction in Metal, and saves the tuning profile on the device.
+MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5× camera. It captures the rear ultra-wide camera, corrects the lens in Metal, and can automatically keep a round game-machine display centered at a consistent size while the phone moves.
 
 ## What is implemented
 
@@ -9,12 +9,13 @@ MaiLens is an iPhone app starter for manually tuning a clip-on fisheye lens on t
 - Manual controls for lens center X/Y, `k1`, `k2`, output horizontal field of view, and an on/off correction switch.
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
+- Automatic machine lock: Vision searches for a large, near-circular display contour, tracks it between detections, maps its center and size into the corrected preview, and smoothly adjusts the Metal crop. The UI reports searching, tracking, and temporary loss states. There is no manual target box.
 
-The app intentionally does not yet include machine tracking, horizon lock, video recording, or live streaming. Those should build on a validated lens profile and the corrected camera frame path in this starter.
+The first automatic-lock detector is a geometric circular-contour heuristic, tuned for the round game-machine display in the supplied example. It is not a trained semantic model and may select a different round object or lose the machine when the display is obscured. This first pass adjusts the live preview only; horizon lock, recording, and streaming are not implemented yet.
 
 ## Calibration note
 
-The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON. Its lens center and radial coefficients come from the preliminary checkerboard calibration: 7 of 8 images detected at 4032×3024, with 1.61 px overall reprojection RMS. The detected corners cover only the middle of the images, so this does not establish edge accuracy for the external fisheye. Capture more checkerboard views around the usable image circle and validate against the app's actual 0.5× video frames before relying on edge geometry.
+The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON, plus the available lens-center and radial-distortion values. Lens tuning is optional for trying automatic lock; different clip-on lens alignment can affect how accurately the target bounds map into the corrected image.
 
 ## Build on CodeMagic
 

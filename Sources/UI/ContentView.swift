@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
+    @StateObject private var autoLock = MachineAutoLockController()
     @State private var settings = LensCorrectionSettings.load()
     @State private var sharedProfile: LensProfileFile?
 
@@ -14,6 +15,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     header
                     cameraPreview
+                    autoLockControls
                     correctionControls
                     calibrationNote
                 }
@@ -44,7 +46,7 @@ struct ContentView: View {
                     .font(.system(size: 14, weight: .black, design: .rounded))
                     .tracking(2.6)
                     .foregroundStyle(Color.mint)
-                Text("鱼眼手动矫正")
+                Text("自动锁定机台")
                     .font(.system(size: 25, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
             }
@@ -77,7 +79,7 @@ struct ContentView: View {
             }
 
             ZStack {
-                FisheyeCameraPreview(camera: camera, settings: settings)
+                FisheyeCameraPreview(camera: camera, autoLock: autoLock, settings: settings)
                     .aspectRatio(9.0 / 16.0, contentMode: .fit)
 
                 if let message = camera.errorMessage {
@@ -124,6 +126,50 @@ struct ContentView: View {
         }
         .padding(14)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var autoLockControls: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(lockStatusColor)
+                    .frame(width: 8, height: 8)
+                Text(autoLock.status.title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("全自动")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.mint)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Color.mint.opacity(0.12), in: Capsule())
+            }
+
+            Text("自动识别圆形机台屏幕，持续调整画面中心和取景大小。手机晃动时，机台会尽量保持在画面中央。")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                autoLock.toggle()
+            } label: {
+                Label(autoLock.isEnabled ? "暂停自动锁定" : "开启自动锁定", systemImage: autoLock.isEnabled ? "pause.fill" : "viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(PrimaryActionStyle())
+        }
+        .padding(17)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var lockStatusColor: Color {
+        switch autoLock.status {
+        case .tracking: return .green
+        case .lost: return .orange
+        case .searching: return .mint
+        case .paused: return .gray
+        }
     }
 
     private var correctionControls: some View {
@@ -188,7 +234,7 @@ struct ContentView: View {
                 Text("机台实拍配置")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
-                Text("输出视场角 106.46° 来自你发来的机台实拍参数；镜头中心和 K1/K2 沿用棋盘预校准。鱼眼边缘仍需补拍验证，修改会自动保存在本机。")
+                Text("已载入 MaiLens 镜头配置和机台实拍视场角。外夹鱼眼镜头的安装差异可用上方参数微调，修改会自动保存在本机。")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(.white.opacity(0.52))
                     .fixedSize(horizontal: false, vertical: true)

@@ -10,6 +10,8 @@ struct FisheyeUniforms {
     float2 sourceSize;
     float2 destinationSize;
     float2 centerNormalized;
+    float2 cropCenterNormalized;
+    float cropZoom;
     float focalX;
     float focalY;
     float horizontalFOVRadians;
@@ -36,11 +38,16 @@ fragment float4 fisheyeFragment(
     sampler linearSampler [[sampler(0)]],
     constant FisheyeUniforms& u [[buffer(0)]]) {
 
+    float2 rectifiedUV = u.cropCenterNormalized + (in.uv - 0.5) / max(u.cropZoom, 0.01);
+
     if (u.correctionEnabled < 0.5) {
-        return cameraFrame.sample(linearSampler, in.uv);
+        if (any(rectifiedUV < 0.0) || any(rectifiedUV > 1.0)) {
+            return float4(0.025, 0.035, 0.04, 1.0);
+        }
+        return cameraFrame.sample(linearSampler, rectifiedUV);
     }
 
-    float2 destinationPixel = in.uv * u.destinationSize;
+    float2 destinationPixel = rectifiedUV * u.destinationSize;
     float2 destinationCenter = u.destinationSize * 0.5;
     float virtualFocal = u.destinationSize.x / (2.0 * tan(u.horizontalFOVRadians * 0.5));
 

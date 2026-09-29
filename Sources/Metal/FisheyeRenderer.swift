@@ -7,6 +7,8 @@ private struct FisheyeUniforms {
     var sourceSize: SIMD2<Float>
     var destinationSize: SIMD2<Float>
     var centerNormalized: SIMD2<Float>
+    var cropCenterNormalized: SIMD2<Float>
+    var cropZoom: Float
     var focalX: Float
     var focalY: Float
     var horizontalFOVRadians: Float
@@ -24,6 +26,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
     private let lock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
     private var settings = LensCorrectionSettings.preliminary
+    private var framing = MachineAutoLockFraming.identity
 
     init?(device: MTLDevice) {
         self.device = device
@@ -64,6 +67,12 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         lock.unlock()
     }
 
+    func setFraming(_ value: MachineAutoLockFraming) {
+        lock.lock()
+        framing = value
+        lock.unlock()
+    }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
@@ -92,7 +101,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
               let cvTexture,
               let cameraTexture = CVMetalTextureGetTexture(cvTexture) else { return }
 
-        let currentSettings = currentSettings()
+        let (currentSettings, currentFraming) = currentRenderState()
         let outputSize = SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let sourceSize = SIMD2(Float(width), Float(height))
         // Video is 16:9 while the calibration stills are 4:3. The camera
@@ -103,6 +112,11 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             sourceSize: sourceSize,
             destinationSize: outputSize,
             centerNormalized: SIMD2(Float(currentSettings.centerX), Float(currentSettings.centerY)),
+            cropCenterNormalized: SIMD2(
+                Float(currentFraming.isActive ? currentFraming.center.x : 0.5),
+                Float(currentFraming.isActive ? currentFraming.center.y : 0.5)
+            ),
+            cropZoom: Float(currentFraming.isActive ? currentFraming.zoom : 1),
             focalX: seedFocal,
             focalY: seedFocal,
             horizontalFOVRadians: Float(currentSettings.horizontalFOV * .pi / 180.0),
@@ -128,15 +142,16 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         return latestPixelBuffer
     }
 
-    private func currentSettings() -> LensCorrectionSettings {
+    private func currentRenderState() -> (LensCorrectionSettings, MachineAutoLockFraming) {
         lock.lock()
         defer { lock.unlock() }
-        return settings
+        return (settings, framing)
     }
 }
 
 struct FisheyeCameraPreview: UIViewRepresentable {
     @ObservedObject var camera: CameraController
+    @ObservedObject var autoLock: MachineAutoLockController
     var settings: LensCorrectionSettings
 
     func makeCoordinator() -> Coordinator {
@@ -155,27 +170,39 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         view.layer.cornerRadius = 22
         view.layer.masksToBounds = true
 
-        camera.onFrame = { [weak renderer = context.coordinator.renderer] frame in
+        camera.onFrame = { [weak renderer = context.coordinator.renderer, autoLock] frame in
             renderer?.setFrame(frame)
+            autoLock.process(frame)
+        }
+        autoLock.onFramingUpdate = { [weak renderer = context.coordinator.renderer] framing in
+            renderer?.setFraming(framing)
         }
         context.coordinator.camera = camera
+        context.coordinator.autoLock = autoLock
         camera.start()
         context.coordinator.renderer.setSettings(settings)
+        autoLock.updateSettings(settings)
+        autoLock.updatePreviewSize(view.bounds.size)
         return view
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer.setSettings(settings)
+        autoLock.updateSettings(settings)
+        autoLock.updatePreviewSize(view.bounds.size)
     }
 
     static func dismantleUIView(_ uiView: MTKView, coordinator: Coordinator) {
         coordinator.camera?.stop()
+        coordinator.camera?.onFrame = nil
+        coordinator.autoLock?.onFramingUpdate = nil
     }
 
     final class Coordinator {
         let device: MTLDevice
         let renderer: FisheyeRenderer
         weak var camera: CameraController?
+        weak var autoLock: MachineAutoLockController?
 
         init() {
             guard let device = MTLCreateSystemDefaultDevice(),
