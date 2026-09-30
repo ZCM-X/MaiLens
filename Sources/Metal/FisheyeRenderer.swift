@@ -231,17 +231,12 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             x: framing.isActive ? framing.center.x : 0.5,
             y: framing.isActive ? framing.center.y : 0.5
         )
-        let horizontalFOV = settings.horizontalFOV * .pi / 180.0
-        let aspect = Double(destinationSize.x / max(destinationSize.y, 1))
-        let verticalFOV = 2.0 * atan(tan(horizontalFOV * 0.5) / max(aspect, 0.01))
-        let yaw = gimbal.isActive ? min(max(gimbal.yaw, -0.95), 0.95) : 0
-        let pitch = gimbal.isActive ? min(max(gimbal.pitch, -0.65), 0.65) : 0
         // A digital gimbal keeps the crop window opposite the phone's angular
         // movement.  The extra crop provides room for that movement without
         // exposing black edges during ordinary hand shake.
-        let gimbalOffset = CGPoint(
-            x: CGFloat(-tan(yaw) / (2.0 * tan(horizontalFOV * 0.5))),
-            y: CGFloat(tan(pitch) / (2.0 * tan(verticalFOV * 0.5)))
+        let gimbalOffset = gimbal.cropOffset(
+            horizontalFOV: settings.horizontalFOV,
+            previewSize: CGSize(width: CGFloat(destinationSize.x), height: CGFloat(destinationSize.y))
         )
         let center = CGPoint(
             x: min(max(baseCenter.x + gimbalOffset.x, 0.03), 0.97),
@@ -301,6 +296,7 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         }
         horizonLock.onGimbalUpdate = { [weak renderer = context.coordinator.renderer] transform in
             renderer?.setGimbalTransform(transform)
+            autoLock.updateGimbalTransform(transform)
         }
         horizonLock.onAngleUpdate = { [weak renderer = context.coordinator.renderer, autoLock] angle in
             renderer?.setHorizonAngle(angle)

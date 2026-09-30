@@ -53,6 +53,7 @@ final class MachineAutoLockController: ObservableObject {
     private var lastVisionBox: CGRect?
     private var lastStatus: MachineLockStatus = .searching
     private var horizonRadians: CGFloat = 0
+    private var gimbal = DigitalGimbalTransform.identity
 
     func updateSettings(_ value: LensCorrectionSettings) {
         visionQueue.async { [weak self] in self?.settings = value }
@@ -65,6 +66,10 @@ final class MachineAutoLockController: ObservableObject {
 
     func updateHorizonAngle(_ angle: CGFloat) {
         visionQueue.async { [weak self] in self?.horizonRadians = angle }
+    }
+
+    func updateGimbalTransform(_ value: DigitalGimbalTransform) {
+        visionQueue.async { [weak self] in self?.gimbal = value }
     }
 
     func toggle() {
@@ -211,7 +216,20 @@ final class MachineAutoLockController: ObservableObject {
         let rectified = rawPoints.map {
             LensCoordinateMapper.rectifiedPoint(fromFisheye: $0, sourceSize: sourceSize, previewSize: displaySize, settings: settings)
         }
-        guard let center = rectified.last else { return }
+        guard let rawCenter = rectified.last else { return }
+
+        // The detector runs on the un-stabilized camera frame. Remove the
+        // predicted gimbal movement here so the smoothed machine center stays
+        // in world coordinates; the renderer adds that movement back when it
+        // samples the enlarged crop.
+        let gimbalOffset = gimbal.cropOffset(
+            horizontalFOV: settings.horizontalFOV,
+            previewSize: displaySize
+        )
+        let center = CGPoint(
+            x: rawCenter.x - gimbalOffset.x,
+            y: rawCenter.y - gimbalOffset.y
+        )
 
         let minX = rectified.map(\.x).min() ?? center.x
         let maxX = rectified.map(\.x).max() ?? center.x

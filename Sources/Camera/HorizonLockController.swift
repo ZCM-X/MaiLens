@@ -12,6 +12,23 @@ struct DigitalGimbalTransform: Equatable {
     var isActive: Bool
 
     static let identity = DigitalGimbalTransform(yaw: 0, pitch: 0, roll: 0, isActive: false)
+
+    /// Normalized movement of the crop window that counteracts this attitude
+    /// change for the supplied rectified preview geometry.
+    func cropOffset(horizontalFOV: Double, previewSize: CGSize) -> CGPoint {
+        guard isActive, previewSize.width > 0, previewSize.height > 0 else {
+            return .zero
+        }
+        let horizontalRadians = horizontalFOV * .pi / 180.0
+        let aspect = Double(previewSize.width / previewSize.height)
+        let verticalRadians = 2.0 * atan(
+            tan(horizontalRadians * 0.5) / max(aspect, 0.01)
+        )
+        return CGPoint(
+            x: CGFloat(-tan(Double(yaw)) / (2.0 * tan(horizontalRadians * 0.5))),
+            y: CGFloat(tan(Double(pitch)) / (2.0 * tan(verticalRadians * 0.5)))
+        )
+    }
 }
 
 /// Uses gravity, rather than magnetic heading, to level the live camera image.
