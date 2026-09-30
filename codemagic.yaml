@@ -11,22 +11,6 @@ workflows:
         script: brew install xcodegen
       - name: Install Metal Toolchain
         script: xcodebuild -downloadComponent MetalToolchain
-      - name: Export Core ML machine detector
-        script: |
-          python3 -m venv .codemagic-mailens-python
-          .codemagic-mailens-python/bin/python -m pip install --upgrade pip
-          # Ultralytics 8.3.0 + Core ML Tools 8.3.0 is the compatible
-          # TorchScript exporter for this YOLO11n weight. Newer torch/coremltools
-          # pairs currently fail in the Core ML MIL converter on CodeMagic.
-          .codemagic-mailens-python/bin/python -m pip install \
-            ultralytics==8.3.0 \
-            coremltools==8.3.0 \
-            numpy==1.26.4 \
-            torch==2.5.0 \
-            torchvision==0.20.0
-          .codemagic-mailens-python/bin/python Training/export_coreml.py \
-            --weights Training/models/machine-lock-yolo11n-video.pt \
-            --output Resources/MachineDetector.mlpackage
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
       - name: Archive unsigned iOS app

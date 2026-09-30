@@ -3,8 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
-    @StateObject private var autoLock = MachineAutoLockController()
-    @StateObject private var horizonLock = HorizonLockController()
+    @StateObject private var gimbalLock = GimbalLockController()
     @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
     @State private var sharedProfile: LensProfileFile?
@@ -17,7 +16,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     header
                     cameraPreview
-                    autoLockControls
+                    lockControls
                     recordingControls
                     correctionControls
                     calibrationNote
@@ -36,10 +35,10 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 camera.start()
-                horizonLock.start()
+                gimbalLock.start()
             } else {
                 camera.stop()
-                horizonLock.stop()
+                gimbalLock.stop()
                 if recorder.isRecording {
                     recorder.stop { camera.stopAudioCapture() }
                 }
@@ -87,7 +86,7 @@ struct ContentView: View {
             }
 
             ZStack {
-                FisheyeCameraPreview(camera: camera, autoLock: autoLock, horizonLock: horizonLock, recorder: recorder, settings: settings)
+                FisheyeCameraPreview(camera: camera, gimbalLock: gimbalLock, recorder: recorder, settings: settings)
                     .aspectRatio(9.0 / 16.0, contentMode: .fit)
 
                 if let message = camera.errorMessage {
@@ -139,9 +138,9 @@ struct ContentView: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                if horizonLock.isGimbalEnabled {
+                if gimbalLock.isGimbalEnabled {
                     Button {
-                        horizonLock.recenterGimbal()
+                        gimbalLock.recenterGimbal()
                     } label: {
                         Label("锁定当前画面", systemImage: "gyroscope")
                             .font(.system(size: 11, weight: .bold))
@@ -162,17 +161,21 @@ struct ContentView: View {
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
     }
 
-    private var autoLockControls: some View {
+    private var lockControls: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(spacing: 9) {
                 Circle()
-                    .fill(lockStatusColor)
+                    .fill(gimbalLock.errorMessage == nil
+                          ? (gimbalLock.isGimbalEnabled ? Color.green : Color.gray)
+                          : Color.orange)
                     .frame(width: 8, height: 8)
-                Text(autoLock.status.title)
+                Text(gimbalLock.errorMessage == nil
+                     ? (gimbalLock.isGimbalEnabled ? "锁定模式运行中" : "锁定模式已关闭")
+                     : "陀螺仪不可用")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Spacer()
-                Text("陀螺仪优先")
+                Text("LOCK")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Color.mint)
                     .padding(.horizontal, 9)
@@ -180,49 +183,38 @@ struct ContentView: View {
                     .background(Color.mint.opacity(0.12), in: Capsule())
             }
 
-            Text("模拟云台直接用陀螺仪抵消手机的左右转动、俯仰和横滚，并从鱼眼画面中预留裁切空间。机台检测锁定默认关闭，避免检测框干扰画面。")
+            Text("锁定当前视线，用 120Hz 陀螺仪抵消手机的左右转动、俯仰和横滚；鱼眼画面会预留裁切空间，让同一方向保持在画面中。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
                 Button {
-                    horizonLock.toggleGimbal()
+                    gimbalLock.toggleGimbal()
                 } label: {
                     Label(
-                        horizonLock.isGimbalEnabled ? "关闭模拟云台" : "开启模拟云台",
-                        systemImage: horizonLock.isGimbalEnabled ? "gyroscope" : "gyroscope"
+                        gimbalLock.isGimbalEnabled ? "关闭锁定模式" : "开启锁定模式",
+                        systemImage: "gyroscope"
                     )
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PrimaryActionStyle())
 
                 Button {
-                    horizonLock.recenterGimbal()
+                gimbalLock.recenterGimbal()
                 } label: {
-                    Label("云台居中", systemImage: "scope")
+                    Label("重新锁定当前画面", systemImage: "scope")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(SecondaryActionStyle())
-                .disabled(!horizonLock.isGimbalEnabled)
+                .disabled(!gimbalLock.isGimbalEnabled)
             }
 
-            Button {
-                autoLock.toggle()
-            } label: {
-                Label(autoLock.isEnabled ? "关闭机台检测（实验）" : "开启机台检测（实验）", systemImage: autoLock.isEnabled ? "pause.fill" : "viewfinder")
-                    .frame(maxWidth: .infinity)
+            if let errorMessage = gimbalLock.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.orange)
             }
-            .buttonStyle(PrimaryActionStyle())
-
-            Button {
-                horizonLock.toggle()
-            } label: {
-                Label(horizonLock.isEnabled ? "地平线稳定已开启" : "开启地平线稳定", systemImage: horizonLock.isEnabled ? "level.fill" : "level")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(SecondaryActionStyle())
-            .disabled(horizonLock.errorMessage != nil)
         }
         .padding(17)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
@@ -234,7 +226,7 @@ struct ContentView: View {
                 Text("处理后录像")
                     .font(.system(size: 19, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                Text("把鱼眼矫正、模拟云台和地平线稳定后的画面与现场声音保存为竖屏 MP4。麦克风只在录制时启用。")
+                Text("把鱼眼矫正和锁定模式处理后的画面与现场声音保存为竖屏 MP4。麦克风只在录制时启用。")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.5))
             }
@@ -284,15 +276,6 @@ struct ContentView: View {
         }
         .padding(17)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
-    }
-
-    private var lockStatusColor: Color {
-        switch autoLock.status {
-        case .tracking: return .green
-        case .lost: return .orange
-        case .searching: return .mint
-        case .paused: return .gray
-        }
     }
 
     private var correctionControls: some View {

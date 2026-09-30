@@ -35,11 +35,6 @@ Build a mixed dataset with sampled frames from that video:
 Review `work/machine-yolo-video/pseudo-label-preview.jpg`, then train it with
 `--data work/machine-yolo-video/dataset.yaml`. The repository contains the
 resulting small detector at `Training/models/machine-lock-yolo11n-video.pt`.
-CodeMagic exports that weight to `Resources/MachineDetector.mlpackage` before
-building the app. Windows cannot perform this Core ML export, so a local
-Windows build uses the contour fallback until the package is generated on the
-macOS builder. The workflow pins Ultralytics 8.3.0, Core ML Tools 8.3.0,
-PyTorch 2.5.0, and NumPy 1.26.4 because Ultralytics 8.3.0 requires NumPy below
-2.0 and the newer exporter combination currently fails inside Core ML's MIL
-converter. Core ML Tools 8.3 reports PyTorch 2.5 as
-its latest tested release, so the matching torchvision 0.20.0 is pinned too.
+The current CodeMagic workflow intentionally skips Core ML export while the
+app is focused on the lock-mode virtual gimbal. The detector and exporter stay
+in this directory for the later machine-stability phase.

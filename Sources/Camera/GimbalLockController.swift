@@ -71,15 +71,13 @@ private struct MotionSample {
 /// implementation: latch a levelled world attitude, build the correction from
 /// the raw attitude (so fast shake is corrected too), and sample the motion
 /// history at the camera frame timestamp.
-final class HorizonLockController: ObservableObject {
-    @Published private(set) var isEnabled = true
+final class GimbalLockController: ObservableObject {
     @Published private(set) var isGimbalEnabled = true
     @Published private(set) var errorMessage: String?
 
-    /// Kept as separate callbacks so the optional machine detector can still
-    /// display its status. The preview uses `renderTransform(forFrameAt:)` for
-    /// frame-timed pose selection.
-    var onAngleUpdate: ((CGFloat) -> Void)?
+    /// The preview uses `renderTransform(forFrameAt:)` for frame-timed pose
+    /// selection. The callback is also used to update the renderer as soon as
+    /// a new motion sample arrives.
     var onGimbalUpdate: ((DigitalGimbalTransform) -> Void)?
 
     private let motionManager = CMMotionManager()
@@ -97,15 +95,11 @@ final class HorizonLockController: ObservableObject {
     private var filtered: simd_quatf
     private var lockedQuaternion: simd_quatf
     private var gravityFiltered = SIMD3<Float>(0, -1, 0)
-    private var horizonQuaternion: simd_quatf
     private var hasSample = false
     private var hasGravity = false
     private var lastTimestamp: TimeInterval = 0
     private var lockVersion: UInt64 = 0
     private var gimbalEnabledValue = true
-    private var horizonEnabledValue = true
-    private var latestTransform = DigitalGimbalTransform.identity
-    private var horizonTiltValue: CGFloat = 0
 
     // Camera coordinates are +X right, +Y down, +Z out through the back
     // camera. Core Motion's device coordinates use +Y up and +Z toward the
@@ -119,14 +113,17 @@ final class HorizonLockController: ObservableObject {
     init() {
         filtered = Self.identityQuaternion()
         lockedQuaternion = Self.identityQuaternion()
-        horizonQuaternion = Self.identityQuaternion()
     }
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
-            publishError("此设备暂不支持地平线稳定和模拟云台。")
+            publishError("此设备暂不支持模拟云台。")
             return
         }
+        stateLock.lock()
+        let enabled = gimbalEnabledValue
+        stateLock.unlock()
+        guard enabled else { return }
         guard !motionManager.isDeviceMotionActive else { return }
 
         motionManager.deviceMotionUpdateInterval = 1.0 / 120.0
@@ -149,56 +146,25 @@ final class HorizonLockController: ObservableObject {
         resetStateLocked()
         stateLock.unlock()
         onGimbalUpdate?(.identity)
-        onAngleUpdate?(0)
     }
 
     func toggle() {
-        stateLock.lock()
-        horizonEnabledValue.toggle()
-        let active = gimbalEnabledValue || horizonEnabledValue
-        let transform = setRenderSampleLocked(
-            quaternion: active ? currentRelativeQuaternionLocked() : Self.identityQuaternion(),
-            timestamp: lastTimestamp
-        )
-        let angle = horizonEnabledValue ? horizonTiltValue : 0
-        let enabled = horizonEnabledValue
-        stateLock.unlock()
-
-        DispatchQueue.main.async { [weak self] in
-            self?.isEnabled = enabled
-        }
-        onGimbalUpdate?(transform)
-        onAngleUpdate?(angle)
-        if !active {
-            motionManager.stopDeviceMotionUpdates()
-        } else {
-            start()
-        }
+        toggleGimbal()
     }
 
     func toggleGimbal() {
         stateLock.lock()
         gimbalEnabledValue.toggle()
-        if gimbalEnabledValue, hasSample {
-            lockedQuaternion = levelLockedAttitude(from: filtered)
-        }
-        let active = gimbalEnabledValue || horizonEnabledValue
-        let transform = setRenderSampleLocked(
-            quaternion: active ? currentRelativeQuaternionLocked() : Self.identityQuaternion(),
-            timestamp: lastTimestamp
-        )
         let enabled = gimbalEnabledValue
+        resetStateLocked()
         stateLock.unlock()
 
         DispatchQueue.main.async { [weak self] in
             self?.isGimbalEnabled = enabled
         }
-        onGimbalUpdate?(transform)
-        if !active {
-            motionManager.stopDeviceMotionUpdates()
-        } else {
-            start()
-        }
+        motionManager.stopDeviceMotionUpdates()
+        onGimbalUpdate?(.identity)
+        if enabled { start() }
     }
 
     /// Latches the current pointing direction. The roll is rebuilt from
@@ -211,8 +177,12 @@ final class HorizonLockController: ObservableObject {
             return
         }
         lockedQuaternion = levelLockedAttitude(from: filtered)
+        // Match the reference app: changing the lock target starts a fresh
+        // identity sample, then subsequent raw IMU samples build correction
+        // from that new levelled attitude. This prevents a recenter tap from
+        // injecting a one-frame jump into the preview.
         let transform = setRenderSampleLocked(
-            quaternion: currentRelativeQuaternionLocked(),
+            quaternion: Self.identityQuaternion(),
             timestamp: lastTimestamp
         )
         stateLock.unlock()
@@ -237,7 +207,7 @@ final class HorizonLockController: ObservableObject {
             relativeDeviceQuaternion: currentRelativeQuaternionLocked(),
             lockVersion: lockVersion
         )
-        let active = gimbalEnabledValue || horizonEnabledValue
+        let active = gimbalEnabledValue
         let gimbalActive = gimbalEnabledValue
         let matrix = active
             ? cameraToDevice * simd_float3x3(sample.relativeDeviceQuaternion) * cameraToDevice
@@ -284,7 +254,7 @@ final class HorizonLockController: ObservableObject {
         if gravityLength > 0.001 { gravityFiltered /= gravityLength }
 
         let relative = currentRelativeQuaternionLocked(rawAttitude: current)
-        let active = gimbalEnabledValue || horizonEnabledValue
+        let active = gimbalEnabledValue
         let matrix = active
             ? cameraToDevice * simd_float3x3(relative) * cameraToDevice
             : matrix_identity_float3x3
@@ -292,19 +262,15 @@ final class HorizonLockController: ObservableObject {
                                                 timestamp: timestamp,
                                                 isActive: active,
                                                 gimbalActive: gimbalEnabledValue)
-        latestTransform = transform
         samples.append(MotionSample(timestamp: timestamp,
                                     relativeDeviceQuaternion: relative,
                                     lockVersion: lockVersion))
         if samples.count > maxSampleCount {
             samples.removeFirst(samples.count - maxSampleCount)
         }
-        let horizonAngle = horizonTiltValue
-        let horizonIsEnabled = horizonEnabledValue
         stateLock.unlock()
 
         onGimbalUpdate?(transform)
-        onAngleUpdate?(horizonIsEnabled ? horizonAngle : 0)
     }
 
     /// Must be called with `stateLock` held.
@@ -314,9 +280,6 @@ final class HorizonLockController: ObservableObject {
             // Raw attitude gives q_true^-1 * q_locked, correcting fast shake
             // that a low-pass-only implementation leaves visible.
             return raw.inverse * lockedQuaternion
-        }
-        if horizonEnabledValue {
-            return horizonCorrectionLocked()
         }
         return Self.identityQuaternion()
     }
@@ -329,7 +292,7 @@ final class HorizonLockController: ObservableObject {
         samples.append(MotionSample(timestamp: timestamp,
                                     relativeDeviceQuaternion: quaternion,
                                     lockVersion: lockVersion))
-        let active = gimbalEnabledValue || horizonEnabledValue
+        let active = gimbalEnabledValue
         let matrix = active
             ? cameraToDevice * simd_float3x3(quaternion) * cameraToDevice
             : matrix_identity_float3x3
@@ -337,7 +300,6 @@ final class HorizonLockController: ObservableObject {
                                                 timestamp: timestamp,
                                                 isActive: active,
                                                 gimbalActive: gimbalEnabledValue)
-        latestTransform = transform
         return transform
     }
 
@@ -364,18 +326,6 @@ final class HorizonLockController: ObservableObject {
         let down = simd_cross(forward, right)
         let lockedCameraToWorld = simd_float3x3(columns: (right, down, forward))
         return simd_quatf(lockedCameraToWorld * cameraToDevice)
-    }
-
-    /// Must be called with `stateLock` held.
-    private func horizonCorrectionLocked() -> simd_quatf {
-        let g = cameraToDevice * gravityFiltered
-        let planar = (g.x * g.x + g.y * g.y).squareRoot()
-        guard planar > 0.2 else { return horizonQuaternion }
-        let theta = atan2(-g.x, g.y)
-        horizonTiltValue = CGFloat(theta)
-        horizonQuaternion = simd_quatf(angle: -theta,
-                                       axis: SIMD3<Float>(0, 0, 1))
-        return horizonQuaternion
     }
 
     /// Must be called with `stateLock` held.
@@ -414,13 +364,10 @@ final class HorizonLockController: ObservableObject {
         filtered = Self.identityQuaternion()
         lockedQuaternion = Self.identityQuaternion()
         gravityFiltered = SIMD3<Float>(0, -1, 0)
-        horizonQuaternion = Self.identityQuaternion()
         hasSample = false
         hasGravity = false
         lastTimestamp = 0
         lockVersion = 0
-        latestTransform = .identity
-        horizonTiltValue = 0
     }
 
     private func publishError(_ message: String) {

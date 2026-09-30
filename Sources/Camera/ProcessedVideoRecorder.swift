@@ -4,7 +4,7 @@ import Combine
 import CoreVideo
 import Foundation
 
-/// Writes frames after lens correction, horizon leveling, and machine framing.
+/// Writes frames after lens correction and virtual-gimbal locking.
 final class ProcessedVideoRecorder: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isFinishing = false

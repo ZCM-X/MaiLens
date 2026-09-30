@@ -1,6 +1,6 @@
 # MaiLens
 
-MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5× camera. It captures the rear ultra-wide camera, corrects the lens in Metal, and can automatically keep a round game-machine display centered at a consistent size while the phone moves.
+MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5× camera. It captures the rear ultra-wide camera, corrects the lens in Metal, and keeps the view locked like a digital gimbal while the phone moves.
 
 ## What is implemented
 
@@ -9,16 +9,15 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - Manual controls for lens center X/Y, `k1`, `k2`, output horizontal field of view, and an on/off correction switch.
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
-- Optional machine lock: when the CodeMagic build includes `MachineDetector.mlmodel`, Vision can run the trained detector and track the round target. It is off at launch because its crop is an experimental feature and must not move the shot while the virtual gimbal is stabilising it.
-- Digital gimbal: CoreMotion latches a levelled camera attitude, builds a raw-attitude quaternion correction at 120 Hz, interpolates it to each camera frame timestamp, and rotates the pinhole ray in Metal before the fisheye inverse map. A 1.36× reserve crop supplies room for yaw, pitch, and roll without exposing the lens edge. The preview has a visible “锁定当前画面” control.
-- Horizon leveling: CoreMotion gravity measurements use the same ray-rotation path when the virtual gimbal is disabled, keeping the horizon level without a second 2D crop transform.
+- Lock mode digital gimbal: CoreMotion latches a levelled camera attitude, builds a raw-attitude quaternion correction at 120 Hz, interpolates it to each camera frame timestamp, and rotates the pinhole ray in Metal before the fisheye inverse map. A 1.36× reserve crop supplies room for yaw, pitch, and roll without exposing the lens edge. The preview has a visible “锁定当前画面” control and a button to re-lock the current view.
+- Machine detection and target framing are intentionally not connected to the preview yet. They remain separate groundwork for the later machine-stability phase, so detection cannot move or replace the locked shot in this version.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
-The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with sampled frames from the lock reference video. The labels are generated from the visible outer ring and should still be reviewed if more camera angles are added. Live streaming remains to be added.
+The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with sampled frames from the lock reference video. The labels are retained for the later machine-stability phase. Live streaming remains to be added.
 
 ## Calibration note
 
-The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON, plus the available lens-center and radial-distortion values. Lens tuning is optional for trying automatic lock; different clip-on lens alignment can affect how accurately the target bounds map into the corrected image.
+The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON, plus the available lens-center and radial-distortion values. Lens tuning is optional; different clip-on lens alignment can affect the corrected image.
 
 ## Build on CodeMagic
 
