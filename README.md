@@ -9,11 +9,11 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - Manual controls for lens center X/Y, `k1`, `k2`, output horizontal field of view, and an on/off correction switch.
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
-- Automatic machine lock: Vision searches for a large, near-circular display contour, tracks it between detections, maps its center and size into the corrected preview, and smoothly adjusts the Metal crop. The UI reports searching, tracking, and temporary loss states. There is no manual target box.
+- Automatic machine lock: when the CodeMagic build includes `MachineDetector.mlmodel`, Vision runs the trained detector, chooses the round target, tracks it between detections, maps its center and size into the corrected preview, and smoothly adjusts the Metal crop. Builds without the model fall back to the circular contour detector. The UI reports searching, tracking, and temporary loss states. There is no manual target box.
 - Horizon leveling: CoreMotion gravity measurements rotate the preview and compensate the crop to keep the horizon level.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
-The first automatic-lock detector is a geometric circular-contour heuristic, tuned for the round game-machine display in the supplied example. It is not a trained semantic model and may select a different round object or lose the machine when the display is obscured. Live streaming remains to be added.
+The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with sampled frames from the lock reference video. The labels are generated from the visible outer ring and should still be reviewed if more camera angles are added. Live streaming remains to be added.
 
 ## Calibration note
 

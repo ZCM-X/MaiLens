@@ -5,3 +5,13 @@ DerivedData/
 xcuserdata/
 *.ipa
 *.app
+runs/
+work/
+.codemagic-mailens-python/
+__pycache__/
+yolo*.pt
+*.onnx
+*.mlpackage
+*.mlmodelc
+!Training/models/
+!Training/models/*.pt

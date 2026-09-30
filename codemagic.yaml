@@ -11,6 +11,14 @@ workflows:
         script: brew install xcodegen
       - name: Install Metal Toolchain
         script: xcodebuild -downloadComponent MetalToolchain
+      - name: Export Core ML machine detector
+        script: |
+          python3 -m venv .codemagic-mailens-python
+          .codemagic-mailens-python/bin/python -m pip install --upgrade pip
+          .codemagic-mailens-python/bin/python -m pip install ultralytics==8.4.101 coremltools
+          .codemagic-mailens-python/bin/python Training/export_coreml.py \
+            --weights Training/models/machine-lock-yolo11n-video.pt \
+            --output Resources/MachineDetector.mlpackage
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
       - name: Archive unsigned iOS app
