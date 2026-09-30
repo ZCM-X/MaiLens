@@ -165,10 +165,32 @@ struct ContentView: View {
                     .background(Color.mint.opacity(0.12), in: Capsule())
             }
 
-            Text("自动识别圆形机台屏幕，持续调整画面中心和取景大小。手机晃动时，机台会尽量保持在画面中央。")
+            Text("模拟云台用陀螺仪抵消手机的左右转动、俯仰和横滚，并预留裁切空间。自动锁定再负责把机台中心和大小慢慢拉回目标位置。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    horizonLock.toggleGimbal()
+                } label: {
+                    Label(
+                        horizonLock.isGimbalEnabled ? "关闭模拟云台" : "开启模拟云台",
+                        systemImage: horizonLock.isGimbalEnabled ? "gyroscope" : "gyroscope"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PrimaryActionStyle())
+
+                Button {
+                    horizonLock.recenterGimbal()
+                } label: {
+                    Label("云台居中", systemImage: "scope")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionStyle())
+                .disabled(!horizonLock.isGimbalEnabled)
+            }
 
             Button {
                 autoLock.toggle()

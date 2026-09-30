@@ -30,6 +30,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
     private var latestPresentationTime = CMTime.zero
     private var settings = LensCorrectionSettings.preliminary
     private var framing = MachineAutoLockFraming.identity
+    private var gimbal = DigitalGimbalTransform.identity
     private var horizonRadians: CGFloat = 0
     private var videoRecorder: ProcessedVideoRecorder?
 
@@ -79,6 +80,12 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         lock.unlock()
     }
 
+    func setGimbalTransform(_ value: DigitalGimbalTransform) {
+        lock.lock()
+        gimbal = value
+        lock.unlock()
+    }
+
     func setHorizonAngle(_ value: CGFloat) {
         lock.lock()
         horizonRadians = value
@@ -119,13 +126,14 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
               let cvTexture,
               let cameraTexture = CVMetalTextureGetTexture(cvTexture) else { return }
 
-        let (currentSettings, currentFraming, currentHorizon, recorder) = currentRenderState()
+        let (currentSettings, currentFraming, currentGimbal, currentHorizon, recorder) = currentRenderState()
         let outputSize = SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let sourceSize = SIMD2(Float(width), Float(height))
         let seedFocal = Float(max(width, height)) * 772.41 / 4032.0
         let uniforms = makeUniforms(
             settings: currentSettings,
             framing: currentFraming,
+            gimbal: currentGimbal,
             horizon: currentHorizon,
             sourceSize: sourceSize,
             destinationSize: outputSize,
@@ -168,6 +176,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
                     let recordUniforms = makeUniforms(
                         settings: currentSettings,
                         framing: currentFraming,
+                        gimbal: currentGimbal,
                         horizon: currentHorizon,
                         sourceSize: sourceSize,
                         destinationSize: recordSize,
@@ -203,30 +212,50 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         return (latestPixelBuffer, latestPresentationTime)
     }
 
-    private func currentRenderState() -> (LensCorrectionSettings, MachineAutoLockFraming, CGFloat, ProcessedVideoRecorder?) {
+    private func currentRenderState() -> (LensCorrectionSettings, MachineAutoLockFraming, DigitalGimbalTransform, CGFloat, ProcessedVideoRecorder?) {
         lock.lock()
         defer { lock.unlock() }
-        return (settings, framing, horizonRadians, videoRecorder)
+        return (settings, framing, gimbal, horizonRadians, videoRecorder)
     }
 
     private func makeUniforms(
         settings: LensCorrectionSettings,
         framing: MachineAutoLockFraming,
+        gimbal: DigitalGimbalTransform,
         horizon: CGFloat,
         sourceSize: SIMD2<Float>,
         destinationSize: SIMD2<Float>,
         focalLength: Float
     ) -> FisheyeUniforms {
+        let baseCenter = CGPoint(
+            x: framing.isActive ? framing.center.x : 0.5,
+            y: framing.isActive ? framing.center.y : 0.5
+        )
+        let horizontalFOV = settings.horizontalFOV * .pi / 180.0
+        let aspect = Double(destinationSize.x / max(destinationSize.y, 1))
+        let verticalFOV = 2.0 * atan(tan(horizontalFOV * 0.5) / max(aspect, 0.01))
+        let yaw = gimbal.isActive ? min(max(gimbal.yaw, -0.95), 0.95) : 0
+        let pitch = gimbal.isActive ? min(max(gimbal.pitch, -0.65), 0.65) : 0
+        // A digital gimbal keeps the crop window opposite the phone's angular
+        // movement.  The extra crop provides room for that movement without
+        // exposing black edges during ordinary hand shake.
+        let gimbalOffset = CGPoint(
+            x: CGFloat(-tan(yaw) / (2.0 * tan(horizontalFOV * 0.5))),
+            y: CGFloat(tan(pitch) / (2.0 * tan(verticalFOV * 0.5)))
+        )
+        let center = CGPoint(
+            x: min(max(baseCenter.x + gimbalOffset.x, 0.03), 0.97),
+            y: min(max(baseCenter.y + gimbalOffset.y, 0.03), 0.97)
+        )
+        let totalZoom = (framing.isActive ? framing.zoom : 1)
+            * (gimbal.isActive ? 1.16 : 1)
         FisheyeUniforms(
             sourceSize: sourceSize,
             destinationSize: destinationSize,
             centerNormalized: SIMD2(Float(settings.centerX), Float(settings.centerY)),
-            cropCenterNormalized: SIMD2(
-                Float(framing.isActive ? framing.center.x : 0.5),
-                Float(framing.isActive ? framing.center.y : 0.5)
-            ),
-            cropZoom: Float(framing.isActive ? framing.zoom : 1),
-            horizonRadians: Float(horizon),
+            cropCenterNormalized: SIMD2(Float(center.x), Float(center.y)),
+            cropZoom: Float(totalZoom),
+            horizonRadians: Float(horizon + (gimbal.isActive ? gimbal.roll : 0)),
             focalX: focalLength,
             focalY: focalLength,
             horizontalFOVRadians: Float(settings.horizontalFOV * .pi / 180.0),
@@ -270,6 +299,9 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         autoLock.onFramingUpdate = { [weak renderer = context.coordinator.renderer] framing in
             renderer?.setFraming(framing)
         }
+        horizonLock.onGimbalUpdate = { [weak renderer = context.coordinator.renderer] transform in
+            renderer?.setGimbalTransform(transform)
+        }
         horizonLock.onAngleUpdate = { [weak renderer = context.coordinator.renderer, autoLock] angle in
             renderer?.setHorizonAngle(angle)
             autoLock.updateHorizonAngle(angle)
@@ -305,6 +337,7 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         coordinator.camera?.onFrame = nil
         coordinator.camera?.onAudioSample = nil
         coordinator.autoLock?.onFramingUpdate = nil
+        coordinator.horizonLock?.onGimbalUpdate = nil
         coordinator.horizonLock?.stop()
         coordinator.horizonLock?.onAngleUpdate = nil
     }
