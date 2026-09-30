@@ -93,6 +93,17 @@ final class MachineAutoLockController: ObservableObject {
 
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         frameCounter += 1
+
+        // A Core ML detector already produces a fresh box. Running a
+        // VNTrackObjectRequest on top of that box made the lock disappear
+        // during fast movement, especially when the target touched a frame
+        // edge. Use direct detections at a steady cadence and smooth the crop
+        // in updateFraming instead.
+        if machineModel.isAvailable {
+            processCoreMLFrame(pixelBuffer)
+            return
+        }
+
         let shouldRedetect = trackingRequest == nil || frameCounter % 12 == 0 || (lostFrameCount > 0 && frameCounter % 3 == 0)
         if shouldRedetect, let candidate = detectMachine(in: pixelBuffer) {
             if trackingRequest == nil || lostFrameCount > 4 || overlap(candidate, lastVisionBox) > 0.12 {
@@ -122,6 +133,30 @@ final class MachineAutoLockController: ObservableObject {
         } catch {
             handleTrackingLoss()
         }
+    }
+
+    private func processCoreMLFrame(_ pixelBuffer: CVPixelBuffer) {
+        let shouldDetect = lastVisionBox == nil || frameCounter % 6 == 0
+        guard shouldDetect else { return }
+
+        if let candidate = detectMachine(in: pixelBuffer) {
+            trackingRequest = nil
+            lastVisionBox = candidate
+            lostFrameCount = 0
+            let frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+            updateFraming(for: candidate, sourceSize: frameSize)
+            publishStatus(.tracking)
+            return
+        }
+
+        lostFrameCount += 1
+        publishStatus(lastVisionBox == nil ? .searching : .lost)
+        guard lostFrameCount > 12 else { return }
+        lastVisionBox = nil
+        smoothedCenter.x += (0.5 - smoothedCenter.x) * 0.12
+        smoothedCenter.y += (0.5 - smoothedCenter.y) * 0.12
+        smoothedZoom += (1.0 - smoothedZoom) * 0.12
+        onFramingUpdate?(MachineAutoLockFraming(center: smoothedCenter, zoom: smoothedZoom, isActive: true))
     }
 
     /// Prefer the trained detector when the Core ML artifact is bundled. The
@@ -312,6 +347,8 @@ final class MachineAutoLockController: ObservableObject {
 private final class MachineCoreMLDetector {
     private let request: VNCoreMLRequest?
 
+    var isAvailable: Bool { request != nil }
+
     init() {
         guard let url = Bundle.main.url(forResource: "MachineDetector", withExtension: "mlmodelc"),
               let model = try? MLModel(contentsOf: url),
@@ -320,7 +357,10 @@ private final class MachineCoreMLDetector {
             return
         }
         let request = VNCoreMLRequest(model: visionModel)
-        request.imageCropAndScaleOption = .scaleFill
+        // Preserve the portrait camera aspect ratio. scaleFill stretches a
+        // round machine into a wide shape before it reaches YOLO, which is a
+        // common reason for ceiling/table false positives in this app.
+        request.imageCropAndScaleOption = .scaleFit
         self.request = request
     }
 
@@ -334,28 +374,38 @@ private final class MachineCoreMLDetector {
 
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         guard !observations.isEmpty else { return nil }
-        let frameWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-        let frameHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        let expectedAspect = frameHeight / max(frameWidth, 1)
 
         var best: (box: CGRect, score: CGFloat)?
         for observation in observations {
             let label = observation.labels.first
-            guard label == nil || label?.identifier.isEmpty == true || label?.identifier == "machine" || label?.identifier == "0" else { continue }
+            // The current training set has one class. Core ML Tools versions
+            // use different identifiers ("machine", "0", or a generated
+            // class name), so filtering by a literal label can discard every
+            // valid detection.
             let confidence = CGFloat(label?.confidence ?? observation.confidence)
-            guard confidence >= 0.18 else { continue }
+            guard confidence >= 0.10 else { continue }
             let box = observation.boundingBox.standardized
             guard box.width > 0.08, box.height > 0.08 else { continue }
 
             let aspect = box.width / max(box.height, 0.001)
-            let aspectError = abs(log(max(aspect, 0.001) / max(expectedAspect, 0.001)))
-            // A circular object is close to square in pixel coordinates. A
-            // soft penalty admits perspective and cropped machine edges.
-            let aspectScore = exp(-min(aspectError, 3) * 1.8)
+            // A circular object remains roughly square after scaleFit. Reject
+            // very tall/wide regions that usually represent the desk or a
+            // side panel, while allowing a partially cropped machine.
+            guard aspect >= 0.55, aspect <= 1.80 else { continue }
+            let aspectScore = exp(-min(abs(log(max(aspect, 0.001))), 3) * 2.0)
             let centerDistance = hypot(box.midX - 0.5, box.midY - 0.5)
             let centerScore = exp(-centerDistance * 2.2)
             let continuity = prior.map { CGFloat(overlap(box, $0)) } ?? 0.35
-            let score = confidence * 0.52 + aspectScore * 0.28 + centerScore * 0.10 + continuity * 0.42
+            let edgeCount = [box.minX < 0.02, box.maxX > 0.98, box.minY < 0.02, box.maxY > 0.98]
+                .filter { $0 }
+                .count
+            // A box touching three or four sides is almost always a false
+            // positive over the whole portrait frame. Let the contour fallback
+            // search for the circular bezel instead of locking the crop to the
+            // ceiling and desk.
+            guard edgeCount <= 2 else { continue }
+            let edgePenalty = CGFloat(edgeCount) * 0.08 + (box.width > 0.96 ? 0.10 : 0)
+            let score = confidence * 0.58 + aspectScore * 0.28 + centerScore * 0.08 + continuity * 0.34 - edgePenalty
             if best == nil || score > best!.score {
                 best = (box, score)
             }

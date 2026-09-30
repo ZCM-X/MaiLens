@@ -188,7 +188,11 @@ final class CameraController: NSObject, ObservableObject {
                 connection.videoRotationAngle = 90
             }
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .off
+                // Let AVFoundation remove high-frequency sensor shake before
+                // the Metal crop applies the larger virtual-gimbal movement.
+                // Turning this off makes the preview visibly smear during a
+                // quick hand movement, especially behind an external fisheye.
+                connection.preferredVideoStabilizationMode = .standard
             }
         }
         isConfigured = true
