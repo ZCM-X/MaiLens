@@ -243,14 +243,17 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             y: min(max(baseCenter.y + gimbalOffset.y, 0.03), 0.97)
         )
         let totalZoom = (framing.isActive ? framing.zoom : 1)
-            * (gimbal.isActive ? 1.16 : 1)
+            * (gimbal.isActive ? 1.36 : 1)
         return FisheyeUniforms(
             sourceSize: sourceSize,
             destinationSize: destinationSize,
             centerNormalized: SIMD2(Float(settings.centerX), Float(settings.centerY)),
             cropCenterNormalized: SIMD2(Float(center.x), Float(center.y)),
             cropZoom: Float(totalZoom),
-            horizonRadians: Float(horizon + (gimbal.isActive ? gimbal.roll : 0)),
+            // In virtual-gimbal mode, preserve the orientation at the
+            // centering moment. When it is off, keep the separate absolute
+            // gravity horizon lock behavior.
+            horizonRadians: Float(gimbal.isActive ? gimbal.roll : horizon),
             focalX: focalLength,
             focalY: focalLength,
             horizontalFOVRadians: Float(settings.horizontalFOV * .pi / 180.0),

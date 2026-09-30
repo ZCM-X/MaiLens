@@ -33,8 +33,11 @@ struct MachineAutoLockFraming {
 /// crop transform to the Metal preview. Detection is automatic; no user ROI is
 /// required.
 final class MachineAutoLockController: ObservableObject {
-    @Published private(set) var status: MachineLockStatus = .searching
-    @Published private(set) var isEnabled = true
+    // The current workflow starts in pure virtual-gimbal mode. Machine
+    // detection can be enabled separately after the crop stabilization has
+    // been verified on the user's phone.
+    @Published private(set) var status: MachineLockStatus = .paused
+    @Published private(set) var isEnabled = false
 
     /// Called on the Vision queue. Consumers must make their own thread-safe copy.
     var onFramingUpdate: ((MachineAutoLockFraming) -> Void)?
@@ -45,13 +48,13 @@ final class MachineAutoLockController: ObservableObject {
     private var trackingRequest: VNTrackObjectRequest?
     private var settings = LensCorrectionSettings.preliminary
     private var displaySize = CGSize(width: 9, height: 16)
-    private var autoLockEnabled = true
+    private var autoLockEnabled = false
     private var frameCounter = 0
     private var lostFrameCount = 0
     private var smoothedCenter = CGPoint(x: 0.5, y: 0.5)
     private var smoothedZoom: CGFloat = 1
     private var lastVisionBox: CGRect?
-    private var lastStatus: MachineLockStatus = .searching
+    private var lastStatus: MachineLockStatus = .paused
     private var horizonRadians: CGFloat = 0
     private var gimbal = DigitalGimbalTransform.identity
 

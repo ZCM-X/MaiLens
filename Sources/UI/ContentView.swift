@@ -135,7 +135,22 @@ struct ContentView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
                         .background(.red.opacity(0.88), in: Capsule())
-                        .padding(12)
+                    .padding(12)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if horizonLock.isGimbalEnabled {
+                    Button {
+                        horizonLock.recenterGimbal()
+                    } label: {
+                        Label("锁定当前画面", systemImage: "gyroscope")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.62), in: Capsule())
+                    }
+                    .padding(12)
                 }
             }
 

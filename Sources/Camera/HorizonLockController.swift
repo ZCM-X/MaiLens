@@ -106,10 +106,11 @@ final class HorizonLockController: ObservableObject {
                     self.onGimbalUpdate?(DigitalGimbalTransform(
                         yaw: CGFloat(yaw),
                         pitch: CGFloat(pitch),
-                        // Absolute gravity leveling is less prone to drift,
-                        // so the relative roll is used only when it is enabled
-                        // separately from the horizon lock.
-                        roll: self.isEnabled ? 0 : CGFloat(roll),
+                        // The virtual gimbal holds the orientation at the
+                        // moment it was centered. This is deliberately
+                        // independent of absolute gravity leveling: the user
+                        // may want to preserve a small initial camera tilt.
+                        roll: CGFloat(roll),
                         isActive: true
                     ))
                 }
@@ -211,7 +212,7 @@ final class HorizonLockController: ObservableObject {
         onGimbalUpdate?(DigitalGimbalTransform(
             yaw: CGFloat(filteredYaw),
             pitch: CGFloat(filteredPitch),
-            roll: isEnabled ? 0 : CGFloat(filteredRoll),
+            roll: CGFloat(filteredRoll),
             isActive: true
         ))
     }

@@ -10,7 +10,7 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 - Automatic machine lock: when the CodeMagic build includes `MachineDetector.mlmodel`, Vision runs the trained detector, chooses the round target, tracks it between detections, maps its center and size into the corrected preview, and smoothly adjusts the Metal crop. Builds without the model fall back to the circular contour detector. The UI reports searching, tracking, and temporary loss states. There is no manual target box.
-- Digital gimbal: CoreMotion locks the camera's starting attitude, filters yaw/pitch/roll at 60 Hz, and moves an enlarged Metal crop in the opposite direction to compensate hand rotation. The preview has a recenter control and keeps the existing absolute gravity-based horizon leveling.
+- Digital gimbal: CoreMotion locks the camera attitude at the centering moment, filters yaw/pitch/roll at 60 Hz, and moves a 1.36× Metal crop in the opposite direction to compensate hand rotation. The preview has a visible “锁定当前画面” control; this mode preserves the chosen initial tilt instead of depending on machine detection.
 - Horizon leveling: CoreMotion gravity measurements rotate the preview and compensate the crop to keep the horizon level.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
