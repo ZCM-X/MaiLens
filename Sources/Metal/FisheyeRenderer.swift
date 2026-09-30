@@ -244,7 +244,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         )
         let totalZoom = (framing.isActive ? framing.zoom : 1)
             * (gimbal.isActive ? 1.16 : 1)
-        FisheyeUniforms(
+        return FisheyeUniforms(
             sourceSize: sourceSize,
             destinationSize: destinationSize,
             centerNormalized: SIMD2(Float(settings.centerX), Float(settings.centerY)),
