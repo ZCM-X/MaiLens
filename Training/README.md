@@ -38,4 +38,7 @@ resulting small detector at `Training/models/machine-lock-yolo11n-video.pt`.
 CodeMagic exports that weight to `Resources/MachineDetector.mlpackage` before
 building the app. Windows cannot perform this Core ML export, so a local
 Windows build uses the contour fallback until the package is generated on the
-macOS builder.
+macOS builder. The workflow pins Ultralytics 8.3.0, Core ML Tools 8.3.0,
+PyTorch 2.5.0, and NumPy 2.3.5 because the newer exporter combination currently
+fails inside Core ML's MIL converter. Core ML Tools 8.3 reports PyTorch 2.5 as
+its latest tested release, so the matching torchvision 0.20.0 is pinned too.
