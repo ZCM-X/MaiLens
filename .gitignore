@@ -15,3 +15,5 @@ yolo*.pt
 *.mlmodelc
 !Training/models/
 !Training/models/*.pt
+!Training/models/*.onnx
+Training/models/machine-lock-yolo11n-video.onnx
