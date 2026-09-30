@@ -29,15 +29,31 @@ struct MachineAutoLockFraming {
     static let identity = MachineAutoLockFraming(center: CGPoint(x: 0.5, y: 0.5), zoom: 1, isActive: false)
 }
 
+private enum MachineDetectionSource: Equatable {
+    case model
+    case contour
+}
+
+private struct MachineDetectionCandidate {
+    let box: CGRect
+    let confidence: CGFloat
+    let source: MachineDetectionSource
+}
+
+private struct MachineModelDetection {
+    let box: CGRect
+    let confidence: CGFloat
+}
+
 /// Detects the prominent circular game-machine display and feeds a smoothed
 /// crop transform to the Metal preview. Detection is automatic; no user ROI is
 /// required.
 final class MachineAutoLockController: ObservableObject {
-    // The current workflow starts in pure virtual-gimbal mode. Machine
-    // detection can be enabled separately after the crop stabilization has
-    // been verified on the user's phone.
-    @Published private(set) var status: MachineLockStatus = .paused
-    @Published private(set) var isEnabled = false
+    // Machine anchoring is the main shooting mode. The virtual gimbal still
+    // supplies high-frequency attitude compensation, but the machine itself
+    // is the reference that decides where the crop window belongs.
+    @Published private(set) var status: MachineLockStatus = .searching
+    @Published private(set) var isEnabled = true
 
     /// Called on the Vision queue. Consumers must make their own thread-safe copy.
     var onFramingUpdate: ((MachineAutoLockFraming) -> Void)?
@@ -48,13 +64,14 @@ final class MachineAutoLockController: ObservableObject {
     private var trackingRequest: VNTrackObjectRequest?
     private var settings = LensCorrectionSettings.preliminary
     private var displaySize = CGSize(width: 9, height: 16)
-    private var autoLockEnabled = false
+    private var autoLockEnabled = true
     private var frameCounter = 0
     private var lostFrameCount = 0
     private var smoothedCenter = CGPoint(x: 0.5, y: 0.5)
     private var smoothedZoom: CGFloat = 1
+    private var smoothedTargetSize: CGFloat?
     private var lastVisionBox: CGRect?
-    private var lastStatus: MachineLockStatus = .paused
+    private var lastStatus: MachineLockStatus = .searching
     private var horizonRadians: CGFloat = 0
     private var gimbal = DigitalGimbalTransform.identity
 
@@ -97,82 +114,108 @@ final class MachineAutoLockController: ObservableObject {
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         frameCounter += 1
 
-        // A Core ML detector already produces a fresh box. Running a
-        // VNTrackObjectRequest on top of that box made the lock disappear
-        // during fast movement, especially when the target touched a frame
-        // edge. Use direct detections at a steady cadence and smooth the crop
-        // in updateFraming instead.
         if machineModel.isAvailable {
             processCoreMLFrame(pixelBuffer)
             return
         }
 
-        let shouldRedetect = trackingRequest == nil || frameCounter % 12 == 0 || (lostFrameCount > 0 && frameCounter % 3 == 0)
+        // The contour fallback follows the same detector/tracker cadence as
+        // the Core ML path. This keeps local Windows previews useful before
+        // CodeMagic has bundled MachineDetector.mlmodelc.
+        let shouldRedetect = trackingRequest == nil
+            || frameCounter % 10 == 0
+            || (lostFrameCount > 0 && frameCounter % 3 == 0)
         if shouldRedetect, let candidate = detectMachine(in: pixelBuffer) {
-            if trackingRequest == nil || lostFrameCount > 4 || overlap(candidate, lastVisionBox) > 0.12 {
-                beginTracking(candidate)
-            }
-        }
-
-        guard let request = trackingRequest else {
-            if frameCounter % 12 == 1 { publishStatus(.searching) }
+            beginTracking(candidate)
+            updateFraming(for: candidate, sourceSize: frameSize(of: pixelBuffer))
+            publishStatus(.tracking)
             return
         }
+
+        if !advanceTracker(on: pixelBuffer) && trackingRequest == nil {
+            publishStatus(.searching)
+        }
+    }
+
+    private func processCoreMLFrame(_ pixelBuffer: CVPixelBuffer) {
+        // Core ML corrects drift every few frames. Vision tracks on every
+        // frame in between, so a lateral phone movement is reflected in the
+        // crop immediately instead of waiting for the next YOLO inference.
+        let shouldDetect = trackingRequest == nil
+            || frameCounter % 8 == 0
+            || (lostFrameCount > 0 && frameCounter % 3 == 0)
+
+        if shouldDetect, let candidate = detectMachine(in: pixelBuffer) {
+            beginTracking(candidate)
+            updateFraming(for: candidate, sourceSize: frameSize(of: pixelBuffer))
+            publishStatus(.tracking)
+            return
+        }
+
+        if !advanceTracker(on: pixelBuffer) {
+            // Keep the last crop during a short detector gap. The target may
+            // be covered by a hand for a few frames; snapping to the middle
+            // here is exactly the failure mode that makes the reference video
+            // look unlike a gimbal.
+            publishStatus(lastVisionBox == nil ? .searching : .lost)
+        }
+    }
+
+    private func frameSize(of pixelBuffer: CVPixelBuffer) -> CGSize {
+        CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+    }
+
+    @discardableResult
+    private func advanceTracker(on pixelBuffer: CVPixelBuffer) -> Bool {
+        guard let request = trackingRequest else { return false }
 
         do {
             try sequenceHandler.perform([request], on: pixelBuffer)
             guard let observation = request.results?.first as? VNDetectedObjectObservation,
-                  observation.confidence >= 0.18 else {
+                  observation.confidence >= 0.15,
+                  observation.boundingBox.width > 0.02,
+                  observation.boundingBox.height > 0.02 else {
                 handleTrackingLoss()
-                return
+                return false
             }
 
             request.inputObservation = observation
             lastVisionBox = observation.boundingBox
             lostFrameCount = 0
-            let frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-            updateFraming(for: observation.boundingBox, sourceSize: frameSize)
+            updateFraming(for: observation.boundingBox, sourceSize: frameSize(of: pixelBuffer))
             publishStatus(.tracking)
+            return true
         } catch {
             handleTrackingLoss()
+            return false
         }
-    }
-
-    private func processCoreMLFrame(_ pixelBuffer: CVPixelBuffer) {
-        let shouldDetect = lastVisionBox == nil || frameCounter % 6 == 0
-        guard shouldDetect else { return }
-
-        if let candidate = detectMachine(in: pixelBuffer) {
-            trackingRequest = nil
-            lastVisionBox = candidate
-            lostFrameCount = 0
-            let frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-            updateFraming(for: candidate, sourceSize: frameSize)
-            publishStatus(.tracking)
-            return
-        }
-
-        lostFrameCount += 1
-        publishStatus(lastVisionBox == nil ? .searching : .lost)
-        guard lostFrameCount > 12 else { return }
-        lastVisionBox = nil
-        smoothedCenter.x += (0.5 - smoothedCenter.x) * 0.12
-        smoothedCenter.y += (0.5 - smoothedCenter.y) * 0.12
-        smoothedZoom += (1.0 - smoothedZoom) * 0.12
-        onFramingUpdate?(MachineAutoLockFraming(center: smoothedCenter, zoom: smoothedZoom, isActive: true))
     }
 
     /// Prefer the trained detector when the Core ML artifact is bundled. The
     /// contour detector remains a useful fallback for development builds that
     /// have not run the macOS/Core ML export step yet.
     private func detectMachine(in pixelBuffer: CVPixelBuffer) -> CGRect? {
-        if let candidate = machineModel.detect(in: pixelBuffer, prior: lastVisionBox) {
-            return candidate
+        var candidates: [MachineDetectionCandidate] = []
+        if let modelCandidate = machineModel.detect(in: pixelBuffer, prior: lastVisionBox) {
+            candidates.append(MachineDetectionCandidate(
+                box: modelCandidate.box,
+                confidence: modelCandidate.confidence,
+                source: .model
+            ))
         }
-        return detectMachineLikeCircle(in: pixelBuffer)
+        if let contourCandidate = detectMachineLikeCircle(in: pixelBuffer) {
+            candidates.append(contourCandidate)
+        }
+
+        guard !candidates.isEmpty else { return nil }
+        let sourceSize = frameSize(of: pixelBuffer)
+        return candidates.max { lhs, rhs in
+            candidateScore(lhs, prior: lastVisionBox, sourceSize: sourceSize)
+                < candidateScore(rhs, prior: lastVisionBox, sourceSize: sourceSize)
+        }?.box
     }
 
-    private func detectMachineLikeCircle(in pixelBuffer: CVPixelBuffer) -> CGRect? {
+    private func detectMachineLikeCircle(in pixelBuffer: CVPixelBuffer) -> MachineDetectionCandidate? {
         let request = VNDetectContoursRequest()
         request.maximumImageDimension = 512
         request.contrastAdjustment = 1.0
@@ -218,14 +261,81 @@ final class MachineAutoLockController: ObservableObject {
                 (Double(box.midX) - 0.5) * frameWidth / shortSide,
                 (Double(box.midY) - 0.5) * frameHeight / shortSide
             )
-            let continuity = prior == nil ? 1.0 : max(0.35, overlap(box, prior))
+            let continuity: Double
+            if let prior {
+                let distance = hypot(box.midX - prior.midX, box.midY - prior.midY)
+                continuity = max(
+                    overlap(box, prior),
+                    exp(-distance * 5.0) * 0.35
+                )
+            } else {
+                continuity = 1.0
+            }
             let score = area * circularity * (1.25 - min(centerDistance, 0.75)) * continuity
             if score > bestScore {
                 bestScore = score
                 bestBox = box
             }
         }
-        return bestBox
+        guard let bestBox else { return nil }
+        return MachineDetectionCandidate(
+            box: bestBox,
+            confidence: CGFloat(min(max(bestScore * 2.0, 0.10), 0.95)),
+            source: .contour
+        )
+    }
+
+    private func candidateScore(
+        _ candidate: MachineDetectionCandidate,
+        prior: CGRect?,
+        sourceSize: CGSize
+    ) -> CGFloat {
+        let box = candidate.box.standardized
+        // Vision boxes are normalized independently by image width and height.
+        // Convert back to pixel dimensions so a physically round machine gets
+        // a roundness score of 1 in portrait as well as landscape orientation.
+        let pixelWidth = box.width * sourceSize.width
+        let pixelHeight = box.height * sourceSize.height
+        let aspect = pixelWidth / max(pixelHeight, 0.001)
+        let shapeScore = CGFloat(exp(-min(abs(log(max(aspect, 0.001))), 3) * 2.2))
+        let area = box.width * box.height
+        let areaScore = CGFloat(exp(-abs(log(max(area, 0.001) / 0.18)) * 0.65))
+        let centerDistance = hypot(box.midX - 0.5, box.midY - 0.5)
+        let centerScore = CGFloat(exp(-centerDistance * 1.8))
+        let continuity: CGFloat
+        if let prior {
+            let overlapScore = CGFloat(overlap(box, prior))
+            let distance = hypot(box.midX - prior.midX, box.midY - prior.midY)
+            continuity = max(overlapScore, CGFloat(exp(-distance * 5.0)) * 0.42)
+        } else {
+            continuity = 0.42
+        }
+
+        let edgeCount = [box.minX < 0.02, box.maxX > 0.98, box.minY < 0.02, box.maxY > 0.98]
+            .filter { $0 }
+            .count
+        var score = candidate.confidence * (candidate.source == .model ? 0.64 : 0.42)
+            + shapeScore * 0.28
+            + areaScore * 0.10
+            + centerScore * 0.07
+            + continuity * 0.46
+
+        // A detector box covering the whole portrait frame is usually the
+        // ceiling, desk, or a hand. A contour with a clear round silhouette
+        // is safer in that case, even when the model's raw confidence is a
+        // little higher.
+        if area > 0.62 { score -= 0.42 }
+        if edgeCount >= 2 { score -= 0.24 }
+        if let prior, continuity < 0.08 {
+            // Do not jump to another high-contrast object while the tracked
+            // machine is briefly occluded.
+            score -= 0.30
+            if candidate.source == .model && overlap(box, prior) < 0.02 {
+                score -= 0.16
+            }
+        }
+        if candidate.source == .contour { score += 0.05 }
+        return score
     }
 
     private func beginTracking(_ box: CGRect) {
@@ -276,7 +386,17 @@ final class MachineAutoLockController: ObservableObject {
         let width = maxX - minX
         let height = maxY - minY
         // Express the target diameter relative to the preview's short side.
-        let targetSize = max(width, height * displaySize.height / displaySize.width)
+        let measuredTargetSize = max(width, height * displaySize.height / displaySize.width)
+        // The detector box is allowed to move quickly, but its measured size
+        // is deliberately low-pass filtered. This removes the visible pump
+        // caused by a hand, bezel highlight, or one-frame Core ML box change.
+        if let previousTargetSize = smoothedTargetSize {
+            smoothedTargetSize = previousTargetSize
+                + (measuredTargetSize - previousTargetSize) * 0.07
+        } else {
+            smoothedTargetSize = measuredTargetSize
+        }
+        let targetSize = smoothedTargetSize ?? measuredTargetSize
         // Keep the screen comfortably inside frame; allow a little zoom-out
         // when the machine moves closer, bounded to avoid extreme lens edges.
         let aspect = displaySize.width / max(displaySize.height, 1)
@@ -303,6 +423,7 @@ final class MachineAutoLockController: ObservableObject {
         guard lostFrameCount > 45 else { return }
         trackingRequest = nil
         lastVisionBox = nil
+        smoothedTargetSize = nil
         smoothedCenter.x += (0.5 - smoothedCenter.x) * 0.08
         smoothedCenter.y += (0.5 - smoothedCenter.y) * 0.08
         smoothedZoom += (1.0 - smoothedZoom) * 0.08
@@ -324,6 +445,7 @@ final class MachineAutoLockController: ObservableObject {
         lostFrameCount = 0
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedZoom = 1
+        smoothedTargetSize = nil
     }
 
     private func publishStatus(_ next: MachineLockStatus) {
@@ -367,7 +489,7 @@ private final class MachineCoreMLDetector {
         self.request = request
     }
 
-    func detect(in pixelBuffer: CVPixelBuffer, prior: CGRect?) -> CGRect? {
+    func detect(in pixelBuffer: CVPixelBuffer, prior: CGRect?) -> MachineModelDetection? {
         guard let request else { return nil }
         do {
             try VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:]).perform([request])
@@ -378,7 +500,7 @@ private final class MachineCoreMLDetector {
         let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
         guard !observations.isEmpty else { return nil }
 
-        var best: (box: CGRect, score: CGFloat)?
+        var best: (box: CGRect, confidence: CGFloat, score: CGFloat)?
         for observation in observations {
             let label = observation.labels.first
             // The current training set has one class. Core ML Tools versions
@@ -390,11 +512,13 @@ private final class MachineCoreMLDetector {
             let box = observation.boundingBox.standardized
             guard box.width > 0.08, box.height > 0.08 else { continue }
 
-            let aspect = box.width / max(box.height, 0.001)
+            let frameWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+            let frameHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+            let aspect = (box.width * frameWidth) / max(box.height * frameHeight, 0.001)
             // A circular object remains roughly square after scaleFit. Reject
             // very tall/wide regions that usually represent the desk or a
             // side panel, while allowing a partially cropped machine.
-            guard aspect >= 0.55, aspect <= 1.80 else { continue }
+            guard aspect >= 0.40, aspect <= 2.50 else { continue }
             let aspectScore = exp(-min(abs(log(max(aspect, 0.001))), 3) * 2.0)
             let centerDistance = hypot(box.midX - 0.5, box.midY - 0.5)
             let centerScore = exp(-centerDistance * 2.2)
@@ -410,10 +534,11 @@ private final class MachineCoreMLDetector {
             let edgePenalty = CGFloat(edgeCount) * 0.08 + (box.width > 0.96 ? 0.10 : 0)
             let score = confidence * 0.58 + aspectScore * 0.28 + centerScore * 0.08 + continuity * 0.34 - edgePenalty
             if best == nil || score > best!.score {
-                best = (box, score)
+                best = (box, confidence, score)
             }
         }
-        return best?.box
+        guard let best else { return nil }
+        return MachineModelDetection(box: best.box, confidence: best.confidence)
     }
 
     private func overlap(_ lhs: CGRect, _ rhs: CGRect) -> Double {
