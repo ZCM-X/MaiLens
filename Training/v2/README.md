@@ -37,3 +37,23 @@ training and validation.
 At runtime, select one candidate using confidence, distance from the previous
 centre, and an edge penalty. Never pass every YOLO box directly to the crop
 controller; the fisheye rim and ceiling create plausible low-confidence boxes.
+
+## Frame geometry pass
+
+The separate `build_frame_geometry_dataset.py` pipeline has two classes:
+`outer_frame` and `inner_screen`. It does not label the eight gameplay
+judgement markers. Its purpose is to measure the four physical gaps between
+the two boundaries:
+
+```text
+left_gap   = inner.minX - outer.minX
+right_gap  = outer.maxX - inner.maxX
+top_gap    = inner.minY - outer.minY
+bottom_gap = outer.maxY - inner.maxY
+```
+
+The trained Windows result is stored as
+`Training/models/frame-geometry-yolo11n-v2.pt` with the matching
+`frame-geometry-yolo11n-v2.onnx`. These boxes are the detector stage. The
+runtime still needs a contour/ellipse fit inside the outer ROI before it
+changes the crop, so a one-frame detector result cannot jerk the preview.
