@@ -49,11 +49,11 @@ private struct MachineModelDetection {
 /// crop transform to the Metal preview. Detection is automatic; no user ROI is
 /// required.
 final class MachineAutoLockController: ObservableObject {
-    // Machine anchoring is the main shooting mode. The virtual gimbal still
-    // supplies high-frequency attitude compensation, but the machine itself
-    // is the reference that decides where the crop window belongs.
-    @Published private(set) var status: MachineLockStatus = .searching
-    @Published private(set) var isEnabled = true
+    // The virtual gimbal is the primary stabilizer. Machine anchoring remains
+    // available as an experiment, but it is deliberately off at launch so a
+    // detector box cannot move the shot or fight the attitude lock.
+    @Published private(set) var status: MachineLockStatus = .paused
+    @Published private(set) var isEnabled = false
 
     /// Called on the Vision queue. Consumers must make their own thread-safe copy.
     var onFramingUpdate: ((MachineAutoLockFraming) -> Void)?
@@ -64,7 +64,7 @@ final class MachineAutoLockController: ObservableObject {
     private var trackingRequest: VNTrackObjectRequest?
     private var settings = LensCorrectionSettings.preliminary
     private var displaySize = CGSize(width: 9, height: 16)
-    private var autoLockEnabled = true
+    private var autoLockEnabled = false
     private var frameCounter = 0
     private var lostFrameCount = 0
     private var smoothedCenter = CGPoint(x: 0.5, y: 0.5)

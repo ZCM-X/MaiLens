@@ -54,7 +54,7 @@ struct ContentView: View {
                     .font(.system(size: 14, weight: .black, design: .rounded))
                     .tracking(2.6)
                     .foregroundStyle(Color.mint)
-                Text("自动锁定机台")
+                Text("模拟云台稳定")
                     .font(.system(size: 25, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
             }
@@ -172,7 +172,7 @@ struct ContentView: View {
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Spacer()
-                Text("全自动")
+                Text("陀螺仪优先")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Color.mint)
                     .padding(.horizontal, 9)
@@ -180,7 +180,7 @@ struct ContentView: View {
                     .background(Color.mint.opacity(0.12), in: Capsule())
             }
 
-            Text("模拟云台用陀螺仪抵消手机的左右转动、俯仰和横滚，并预留裁切空间。自动锁定再负责把机台中心和大小慢慢拉回目标位置。")
+            Text("模拟云台直接用陀螺仪抵消手机的左右转动、俯仰和横滚，并从鱼眼画面中预留裁切空间。机台检测锁定默认关闭，避免检测框干扰画面。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
@@ -210,7 +210,7 @@ struct ContentView: View {
             Button {
                 autoLock.toggle()
             } label: {
-                Label(autoLock.isEnabled ? "暂停自动锁定" : "开启自动锁定", systemImage: autoLock.isEnabled ? "pause.fill" : "viewfinder")
+                Label(autoLock.isEnabled ? "关闭机台检测（实验）" : "开启机台检测（实验）", systemImage: autoLock.isEnabled ? "pause.fill" : "viewfinder")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(PrimaryActionStyle())
@@ -234,7 +234,7 @@ struct ContentView: View {
                 Text("处理后录像")
                     .font(.system(size: 19, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                Text("把鱼眼矫正、机台锁定和地平线稳定后的画面与现场声音保存为竖屏 MP4。麦克风只在录制时启用。")
+                Text("把鱼眼矫正、模拟云台和地平线稳定后的画面与现场声音保存为竖屏 MP4。麦克风只在录制时启用。")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.5))
             }
