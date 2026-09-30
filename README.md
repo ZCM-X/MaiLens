@@ -10,6 +10,7 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 - Lock mode digital gimbal: CoreMotion latches a levelled camera attitude, builds a raw-attitude quaternion correction at 120 Hz, interpolates it to each camera frame timestamp, and rotates the pinhole ray in Metal before the fisheye inverse map. A 1.36× reserve crop supplies room for yaw, pitch, and roll without exposing the lens edge. The preview has a visible “锁定当前画面” control and a button to re-lock the current view.
+- Camera lock controls: after the camera has warmed up, MaiLens automatically latches the current focus position and exposure duration/ISO. The UI can unlock either one or both, relock them, and adjust exposure compensation from −3 to +3 EV. Compensation continues to work while exposure is locked by changing custom ISO/shutter values.
 - Machine detection and target framing are intentionally not connected to the preview yet. They remain separate groundwork for the later machine-stability phase, so detection cannot move or replace the locked shot in this version.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 

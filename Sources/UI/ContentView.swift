@@ -16,6 +16,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     header
                     cameraPreview
+                    cameraControls
                     lockControls
                     recordingControls
                     correctionControls
@@ -201,7 +202,7 @@ struct ContentView: View {
                 .buttonStyle(PrimaryActionStyle())
 
                 Button {
-                gimbalLock.recenterGimbal()
+                    gimbalLock.recenterGimbal()
                 } label: {
                     Label("重新锁定当前画面", systemImage: "scope")
                         .frame(maxWidth: .infinity)
@@ -211,6 +212,86 @@ struct ContentView: View {
             }
 
             if let errorMessage = gimbalLock.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.orange)
+            }
+        }
+        .padding(17)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var cameraControls: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Image(systemName: "camera.aperture")
+                    .foregroundStyle(Color.mint)
+                Text("对焦与曝光")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text(camera.focusLocked && camera.exposureLocked ? "LOCKED" : "AUTO")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(camera.focusLocked && camera.exposureLocked
+                                     ? Color.mint
+                                     : Color.white.opacity(0.52))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.08), in: Capsule())
+            }
+
+            Text("先让画面自动合焦和测光，再锁住当前值；曝光补偿在锁定后仍然可以微调。")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    camera.toggleFocusLock()
+                } label: {
+                    Label(camera.focusLocked ? "解锁对焦" : "锁定对焦",
+                          systemImage: camera.focusLocked ? "lock.open" : "lock")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionStyle())
+
+                Button {
+                    camera.toggleExposureLock()
+                } label: {
+                    Label(camera.exposureLocked ? "解锁曝光" : "锁定曝光",
+                          systemImage: camera.exposureLocked ? "lock.open" : "sun.max")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionStyle())
+            }
+            .disabled(!camera.isRunning)
+
+            Button {
+                camera.toggleFocusAndExposureLock()
+            } label: {
+                Label(
+                    camera.focusLocked && camera.exposureLocked
+                        ? "恢复自动对焦与曝光"
+                        : "同时锁定对焦与曝光",
+                    systemImage: camera.focusLocked && camera.exposureLocked ? "lock.open" : "lock.fill"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(PrimaryActionStyle())
+            .disabled(!camera.isRunning)
+
+            TuningSlider(
+                title: "曝光补偿",
+                value: Binding(
+                    get: { camera.exposureBias },
+                    set: { camera.setExposureBias($0) }
+                ),
+                range: -3...3,
+                valueFormat: "%+.1f EV"
+            )
+            .disabled(!camera.isRunning)
+
+            if let errorMessage = camera.focusExposureError {
                 Text(errorMessage)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.orange)
