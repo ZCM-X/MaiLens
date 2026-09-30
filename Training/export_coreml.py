@@ -1,9 +1,10 @@
-"""Export the trained MaiLens detector for Vision/Core ML on macOS.
+"""Export the trained MaiLens frame-geometry detector for Vision/Core ML.
 
 Ultralytics deliberately refuses Core ML export on Windows.  CodeMagic runs
-this script on its macOS builder before XcodeGen creates the project.  The
-resulting package is named ``MachineDetector`` so the app can load it without
-generated Swift model classes.
+this script on its macOS builder before XcodeGen creates the project. The
+resulting package is named ``FrameGeometryDetector`` so the app can load it
+without generated Swift model classes. It contains ``outer_frame`` and
+``inner_screen`` classes.
 """
 
 from __future__ import annotations

@@ -54,6 +54,8 @@ bottom_gap = outer.maxY - inner.maxY
 
 The trained Windows result is stored as
 `Training/models/frame-geometry-yolo11n-v2.pt` with the matching
-`frame-geometry-yolo11n-v2.onnx`. These boxes are the detector stage. The
-runtime still needs a contour/ellipse fit inside the outer ROI before it
-changes the crop, so a one-frame detector result cannot jerk the preview.
+`frame-geometry-yolo11n-v2.onnx`. CodeMagic exports the same weights to
+`Resources/FrameGeometryDetector.mlpackage` before XcodeGen builds the app.
+At runtime `MachineGeometryLockController` uses both boxes, validates their
+containment, refines the inner boundary with Vision contours, and applies EMA
+smoothing plus a short detector-loss hold before changing the Metal crop.

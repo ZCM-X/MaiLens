@@ -21,6 +21,11 @@ struct FisheyeUniforms {
     float k2;
     float correctionEnabled;
     float gimbalActive;
+    float2 machineCenter;
+    float machineZoom;
+    float machineStretchX;
+    float machineStretchY;
+    float machineActive;
 };
 
 vertex VertexOut fisheyeVertex(uint vertexID [[vertex_id]]) {
@@ -41,10 +46,14 @@ fragment float4 fisheyeFragment(
     sampler linearSampler [[sampler(0)]],
     constant FisheyeUniforms& u [[buffer(0)]]) {
 
-    // The virtual gimbal reserves a fixed border around the locked view.
-    // Its full 3D pose is applied below, so there is no separate 2D horizon
-    // rotation or machine-detection crop in this render path.
-    float2 rectifiedUV = 0.5 + (in.uv - 0.5) / max(u.cropZoom, 0.01);
+    // Both virtual gimbal and machine lock operate in the rectified view. The
+    // machine centre is held in the locked coordinate system, while the
+    // gimbal rotation below maps each ray back into the live camera frame.
+    float2 viewOffset = in.uv - 0.5;
+    viewOffset /= float2(max(u.machineStretchX, 0.01), max(u.machineStretchY, 0.01));
+    viewOffset /= max(u.machineZoom, 0.01);
+    float2 lockedViewCenter = u.machineActive > 0.5 ? u.machineCenter : 0.5;
+    float2 rectifiedUV = lockedViewCenter + viewOffset / max(u.cropZoom, 0.01);
 
     // Preserve the old raw-lens preview when no virtual gimbal is active. If
     // the gimbal is active, continue through the ray path below so yaw/pitch/

@@ -11,10 +11,10 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 - Lock mode digital gimbal: CoreMotion latches a levelled camera attitude, builds a raw-attitude quaternion correction at 120 Hz, interpolates it to each camera frame timestamp, and rotates the pinhole ray in Metal before the fisheye inverse map. A 1.36× reserve crop supplies room for yaw, pitch, and roll without exposing the lens edge. The preview has a visible “锁定当前画面” control and a button to re-lock the current view.
 - Camera lock controls: after the camera has warmed up, MaiLens automatically latches the current focus position and exposure duration/ISO. The UI can unlock either one or both, relock them, and adjust exposure compensation from −3 to +3 EV. Compensation continues to work while exposure is locked by changing custom ISO/shutter values.
-- Machine detection and target framing are intentionally not connected to the preview yet. They remain separate groundwork for the later machine-stability phase, so detection cannot move or replace the locked shot in this version.
+- Automatic machine geometry lock: a two-class `outer_frame`/`inner_screen` Core ML detector is paired with Vision contour refinement, containment and edge checks, short-loss tracking, EMA crop smoothing, and mild anisotropic correction. The Metal preview and processed recording consume the same framing state, so the machine keeps its position and apparent distance while the phone moves.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
-The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with sampled frames from the lock reference video. The labels are retained for the later machine-stability phase. Live streaming remains to be added.
+The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with the real fisheye still from `H:\IMG_8695.JPG`. The eight chart judgement markers are deliberately excluded from geometry training. CodeMagic exports the trained frame model to `Resources/FrameGeometryDetector.mlpackage` before building; live streaming remains to be added.
 
 ## Calibration note
 

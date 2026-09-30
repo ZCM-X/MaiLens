@@ -11,6 +11,20 @@ workflows:
         script: brew install xcodegen
       - name: Install Metal Toolchain
         script: xcodebuild -downloadComponent MetalToolchain
+      - name: Export frame geometry detector to Core ML
+        script: |
+          python3 -m venv .codemagic-mailens-python
+          . .codemagic-mailens-python/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install \
+            ultralytics==8.4.101 \
+            coremltools==8.3.0 \
+            numpy==1.26.4 \
+            torch==2.5.0 \
+            torchvision==0.20.0
+          python Training/export_coreml.py \
+            --weights Training/models/frame-geometry-yolo11n-v2.pt \
+            --output Resources/FrameGeometryDetector.mlpackage
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
       - name: Archive unsigned iOS app

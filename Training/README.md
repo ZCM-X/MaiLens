@@ -35,6 +35,8 @@ Build a mixed dataset with sampled frames from that video:
 Review `work/machine-yolo-video/pseudo-label-preview.jpg`, then train it with
 `--data work/machine-yolo-video/dataset.yaml`. The repository contains the
 resulting small detector at `Training/models/machine-lock-yolo11n-video.pt`.
-The current CodeMagic workflow intentionally skips Core ML export while the
-app is focused on the lock-mode virtual gimbal. The detector and exporter stay
-in this directory for the later machine-stability phase.
+The CodeMagic workflow exports the two-class frame-geometry detector to
+`Resources/FrameGeometryDetector.mlpackage` with a macOS-compatible pinned
+environment before XcodeGen runs. The app loads it through Vision at runtime;
+the virtual gimbal and geometry crop are independent switches, so the latter
+can be tested without changing the IMU lock.

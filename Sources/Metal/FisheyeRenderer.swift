@@ -20,6 +20,11 @@ private struct FisheyeUniforms {
     var k2: Float
     var correctionEnabled: Float
     var gimbalActive: Float
+    var machineCenter: SIMD2<Float>
+    var machineZoom: Float
+    var machineStretchX: Float
+    var machineStretchY: Float
+    var machineActive: Float
 }
 
 final class FisheyeRenderer: NSObject, MTKViewDelegate {
@@ -33,6 +38,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
     private var latestPresentationTime = CMTime.zero
     private var settings = LensCorrectionSettings.preliminary
     private var gimbal = DigitalGimbalTransform.identity
+    private var machineFraming = MachineGeometryFraming.identity
     private weak var gimbalController: GimbalLockController?
     private var videoRecorder: ProcessedVideoRecorder?
 
@@ -82,6 +88,12 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         lock.unlock()
     }
 
+    func setMachineFraming(_ value: MachineGeometryFraming) {
+        lock.lock()
+        machineFraming = value
+        lock.unlock()
+    }
+
     /// The controller owns the short IMU history. The renderer asks for the
     /// pose matching each camera frame instead of using whichever sensor
     /// callback happened to arrive most recently.
@@ -125,7 +137,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
               let cvTexture,
               let cameraTexture = CVMetalTextureGetTexture(cvTexture) else { return }
 
-        let (currentSettings, fallbackGimbal, controller, recorder) = currentRenderState()
+        let (currentSettings, fallbackGimbal, framing, controller, recorder) = currentRenderState()
         let currentGimbal = controller?.renderTransform(forFrameAt: presentationTime.seconds)
             ?? fallbackGimbal
         let outputSize = SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height))
@@ -136,7 +148,8 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             gimbal: currentGimbal,
             sourceSize: sourceSize,
             destinationSize: outputSize,
-            focalLength: seedFocal
+            focalLength: seedFocal,
+            framing: framing
         )
 
         encoder.setRenderPipelineState(pipeline)
@@ -177,7 +190,8 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
                         gimbal: currentGimbal,
                         sourceSize: sourceSize,
                         destinationSize: recordSize,
-                        focalLength: seedFocal
+                        focalLength: seedFocal,
+                        framing: framing
                     )
                     recordEncoder.setRenderPipelineState(pipeline)
                     recordEncoder.setFragmentTexture(cameraTexture, index: 0)
@@ -209,10 +223,10 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         return (latestPixelBuffer, latestPresentationTime)
     }
 
-    private func currentRenderState() -> (LensCorrectionSettings, DigitalGimbalTransform, GimbalLockController?, ProcessedVideoRecorder?) {
+    private func currentRenderState() -> (LensCorrectionSettings, DigitalGimbalTransform, MachineGeometryFraming, GimbalLockController?, ProcessedVideoRecorder?) {
         lock.lock()
         defer { lock.unlock() }
-        return (settings, gimbal, gimbalController, videoRecorder)
+        return (settings, gimbal, machineFraming, gimbalController, videoRecorder)
     }
 
     private func makeUniforms(
@@ -220,7 +234,8 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         gimbal: DigitalGimbalTransform,
         sourceSize: SIMD2<Float>,
         destinationSize: SIMD2<Float>,
-        focalLength: Float
+        focalLength: Float,
+        framing: MachineGeometryFraming
     ) -> FisheyeUniforms {
         let totalZoom = gimbal.gimbalActive ? 1.36 : 1
         let matrix = gimbal.isActive ? gimbal.cameraFromLocked : matrix_identity_float3x3
@@ -239,7 +254,12 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             k1: settings.correctionEnabled ? Float(settings.k1) : 0,
             k2: settings.correctionEnabled ? Float(settings.k2) : 0,
             correctionEnabled: settings.correctionEnabled ? 1 : 0,
-            gimbalActive: gimbal.isActive ? 1 : 0
+            gimbalActive: gimbal.isActive ? 1 : 0,
+            machineCenter: SIMD2<Float>(Float(framing.center.x), Float(framing.center.y)),
+            machineZoom: framing.isActive ? Float(framing.zoom) : 1,
+            machineStretchX: framing.isActive ? Float(framing.stretchX) : 1,
+            machineStretchY: framing.isActive ? Float(framing.stretchY) : 1,
+            machineActive: framing.isActive ? 1 : 0
         )
     }
 }
@@ -247,6 +267,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
 struct FisheyeCameraPreview: UIViewRepresentable {
     @ObservedObject var camera: CameraController
     @ObservedObject var gimbalLock: GimbalLockController
+    @ObservedObject var machineLock: MachineGeometryLockController
     @ObservedObject var recorder: ProcessedVideoRecorder
     var settings: LensCorrectionSettings
 
@@ -268,20 +289,33 @@ struct FisheyeCameraPreview: UIViewRepresentable {
 
         camera.onFrame = { [weak renderer = context.coordinator.renderer] frame, presentationTime in
             renderer?.setFrame(frame, presentationTime: presentationTime)
+            machineLock.process(frame)
         }
         camera.onAudioSample = { [weak recorder] sampleBuffer in
             recorder?.appendAudioSample(sampleBuffer)
         }
         gimbalLock.onGimbalUpdate = { [weak renderer = context.coordinator.renderer] transform in
             renderer?.setGimbalTransform(transform)
+            machineLock.updateGimbalTransform(transform)
+        }
+        machineLock.onFramingUpdate = { [weak renderer = context.coordinator.renderer] framing in
+            renderer?.setMachineFraming(framing)
         }
         context.coordinator.camera = camera
         context.coordinator.gimbalLock = gimbalLock
+        context.coordinator.machineLock = machineLock
         context.coordinator.recorder = recorder
         context.coordinator.renderer.setVideoRecorder(recorder)
         context.coordinator.renderer.setGimbalController(gimbalLock)
+        context.coordinator.renderer.setMachineFraming(machineLock.framing)
+        machineLock.updateSettings(settings)
+        machineLock.updatePreviewSize(view.drawableSize)
+        DispatchQueue.main.async {
+            machineLock.updatePreviewSize(view.drawableSize)
+        }
         camera.start()
         gimbalLock.start()
+        machineLock.start()
         context.coordinator.renderer.setSettings(settings)
         return view
     }
@@ -290,6 +324,9 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         context.coordinator.renderer.setSettings(settings)
         context.coordinator.renderer.setVideoRecorder(recorder)
         context.coordinator.renderer.setGimbalController(gimbalLock)
+        context.coordinator.renderer.setMachineFraming(machineLock.framing)
+        machineLock.updateSettings(settings)
+        machineLock.updatePreviewSize(view.drawableSize)
     }
 
     static func dismantleUIView(_ uiView: MTKView, coordinator: Coordinator) {
@@ -303,7 +340,10 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         coordinator.camera?.onFrame = nil
         coordinator.camera?.onAudioSample = nil
         coordinator.gimbalLock?.onGimbalUpdate = nil
+        coordinator.machineLock?.onFramingUpdate = nil
         coordinator.renderer.setGimbalController(nil)
+        coordinator.renderer.setMachineFraming(.identity)
+        coordinator.machineLock?.stop()
         coordinator.gimbalLock?.stop()
     }
 
@@ -312,6 +352,7 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         let renderer: FisheyeRenderer
         weak var camera: CameraController?
         weak var gimbalLock: GimbalLockController?
+        weak var machineLock: MachineGeometryLockController?
         weak var recorder: ProcessedVideoRecorder?
 
         init() {

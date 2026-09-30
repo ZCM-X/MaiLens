@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
     @StateObject private var gimbalLock = GimbalLockController()
+    @StateObject private var machineLock = MachineGeometryLockController()
     @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
     @State private var sharedProfile: LensProfileFile?
@@ -18,6 +19,7 @@ struct ContentView: View {
                     cameraPreview
                     cameraControls
                     lockControls
+                    machineGeometryControls
                     recordingControls
                     correctionControls
                     calibrationNote
@@ -37,9 +39,11 @@ struct ContentView: View {
             if phase == .active {
                 camera.start()
                 gimbalLock.start()
+                machineLock.start()
             } else {
                 camera.stop()
                 gimbalLock.stop()
+                machineLock.stop()
                 if recorder.isRecording {
                     recorder.stop { camera.stopAudioCapture() }
                 }
@@ -87,7 +91,7 @@ struct ContentView: View {
             }
 
             ZStack {
-                FisheyeCameraPreview(camera: camera, gimbalLock: gimbalLock, recorder: recorder, settings: settings)
+                FisheyeCameraPreview(camera: camera, gimbalLock: gimbalLock, machineLock: machineLock, recorder: recorder, settings: settings)
                     .aspectRatio(9.0 / 16.0, contentMode: .fit)
 
                 if let message = camera.errorMessage {
@@ -153,6 +157,18 @@ struct ContentView: View {
                     .padding(12)
                 }
             }
+            .overlay(alignment: .bottomLeading) {
+                if machineLock.isEnabled {
+                    Label(machineLock.status.title,
+                          systemImage: machineLock.status == .tracking ? "scope" : "viewfinder")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(machineLock.status == .tracking ? Color.mint : Color.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.62), in: Capsule())
+                        .padding(12)
+                }
+            }
 
             Text(camera.cameraName)
                 .font(.system(size: 11, weight: .medium))
@@ -215,6 +231,63 @@ struct ContentView: View {
                 Text(errorMessage)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.orange)
+            }
+        }
+        .padding(17)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var machineGeometryControls: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(machineLock.isEnabled
+                          ? (machineLock.status == .tracking ? Color.green : Color.orange)
+                          : Color.gray)
+                    .frame(width: 8, height: 8)
+                Text(machineLock.isEnabled ? machineLock.status.title : "机台几何锁定已关闭")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text(machineLock.detectorAvailable ? "AI FRAME" : "等待模型")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(machineLock.detectorAvailable ? Color.mint : Color.orange)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.08), in: Capsule())
+            }
+
+            Text("自动检测机台外框和内屏，用连续检测、轮廓拟合与平滑裁切保持机台中心和距离稳定。谱面的 8 个判定点不会参与锁定。")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    machineLock.toggle()
+                } label: {
+                    Label(machineLock.isEnabled ? "关闭机台锁定" : "开启机台锁定",
+                          systemImage: machineLock.isEnabled ? "scope" : "viewfinder")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PrimaryActionStyle())
+
+                if machineLock.framing.isActive {
+                    Text(String(format: "× %.2f", machineLock.framing.zoom))
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.mint)
+                        .frame(minWidth: 62)
+                        .padding(.vertical, 13)
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+                }
+            }
+
+            if machineLock.isEnabled && machineLock.framing.isActive {
+                let gaps = machineLock.framing
+                Text(String(format: "外框间距  左 %.2f  右 %.2f  上 %.2f  下 %.2f",
+                            gaps.leftGap, gaps.rightGap, gaps.topGap, gaps.bottomGap))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.45))
             }
         }
         .padding(17)
