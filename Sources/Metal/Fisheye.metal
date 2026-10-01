@@ -10,6 +10,12 @@ struct FisheyeUniforms {
     float4 rotation0;
     float4 rotation1;
     float4 rotation2;
+    float4 rotationTop0;
+    float4 rotationTop1;
+    float4 rotationTop2;
+    float4 rotationBottom0;
+    float4 rotationBottom1;
+    float4 rotationBottom2;
     float2 sourceSize;
     float2 destinationSize;
     float2 centerNormalized;
@@ -73,9 +79,17 @@ fragment float4 fisheyeFragment(
     float2 lockedPixels = (rectifiedUV - 0.5) * u.destinationSize;
     float2 rectilinear = lockedPixels / max(virtualFocal, 1.0);
     float3 rayLocked = normalize(float3(rectilinear.x, rectilinear.y, 1.0));
-    float3x3 cameraFromLocked = float3x3(u.rotation0.xyz,
-                                         u.rotation1.xyz,
-                                         u.rotation2.xyz);
+    float3x3 cameraFromLockedTop = float3x3(u.rotationTop0.xyz,
+                                            u.rotationTop1.xyz,
+                                            u.rotationTop2.xyz);
+    float3x3 cameraFromLockedBottom = float3x3(u.rotationBottom0.xyz,
+                                               u.rotationBottom1.xyz,
+                                               u.rotationBottom2.xyz);
+    float3x3 cameraFromLocked = float3x3(
+        mix(cameraFromLockedTop[0], cameraFromLockedBottom[0], in.uv.y),
+        mix(cameraFromLockedTop[1], cameraFromLockedBottom[1], in.uv.y),
+        mix(cameraFromLockedTop[2], cameraFromLockedBottom[2], in.uv.y)
+    );
     float3 raySource = normalize(cameraFromLocked * rayLocked);
 
     float radial = length(raySource.xy);

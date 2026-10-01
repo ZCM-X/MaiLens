@@ -9,6 +9,12 @@ private struct FisheyeUniforms {
     var rotation0: SIMD4<Float>
     var rotation1: SIMD4<Float>
     var rotation2: SIMD4<Float>
+    var rotationTop0: SIMD4<Float>
+    var rotationTop1: SIMD4<Float>
+    var rotationTop2: SIMD4<Float>
+    var rotationBottom0: SIMD4<Float>
+    var rotationBottom1: SIMD4<Float>
+    var rotationBottom2: SIMD4<Float>
     var sourceSize: SIMD2<Float>
     var destinationSize: SIMD2<Float>
     var centerNormalized: SIMD2<Float>
@@ -138,8 +144,9 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
               let cameraTexture = CVMetalTextureGetTexture(cvTexture) else { return }
 
         let (currentSettings, fallbackGimbal, framing, controller, recorder) = currentRenderState()
-        let currentGimbal = controller?.renderTransform(forFrameAt: presentationTime.seconds)
-            ?? fallbackGimbal
+        let poses = controller?.renderPoses(forFrameAt: presentationTime.seconds, readoutDuration: 0.008)
+            ?? DigitalGimbalFramePoses(top: fallbackGimbal, center: fallbackGimbal, bottom: fallbackGimbal)
+        let currentGimbal = poses.center
         let outputSize = SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let sourceSize = SIMD2(Float(width), Float(height))
         let seedFocal = Float(max(width, height)) * 772.41 / 4032.0
@@ -149,7 +156,8 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             sourceSize: sourceSize,
             destinationSize: outputSize,
             focalLength: seedFocal,
-            framing: framing
+            framing: framing,
+            poses: poses
         )
 
         encoder.setRenderPipelineState(pipeline)
@@ -191,7 +199,8 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
                         sourceSize: sourceSize,
                         destinationSize: recordSize,
                         focalLength: seedFocal,
-                        framing: framing
+                        framing: framing,
+                        poses: poses
                     )
                     recordEncoder.setRenderPipelineState(pipeline)
                     recordEncoder.setFragmentTexture(cameraTexture, index: 0)
@@ -235,15 +244,26 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         sourceSize: SIMD2<Float>,
         destinationSize: SIMD2<Float>,
         focalLength: Float,
-        framing: MachineGeometryFraming
+        framing: MachineGeometryFraming,
+        poses: DigitalGimbalFramePoses
     ) -> FisheyeUniforms {
         let totalZoom = gimbal.gimbalActive ? 1.36 : 1
-        let matrix = gimbal.isActive ? gimbal.cameraFromLocked : matrix_identity_float3x3
-        let columns = matrix.columns
+        let centerMatrix = gimbal.isActive ? gimbal.cameraFromLocked : matrix_identity_float3x3
+        let topMatrix = poses.top.isActive ? poses.top.cameraFromLocked : matrix_identity_float3x3
+        let bottomMatrix = poses.bottom.isActive ? poses.bottom.cameraFromLocked : matrix_identity_float3x3
+        let columns = centerMatrix.columns
+        let topColumns = topMatrix.columns
+        let bottomColumns = bottomMatrix.columns
         return FisheyeUniforms(
             rotation0: SIMD4<Float>(columns.0, 0),
             rotation1: SIMD4<Float>(columns.1, 0),
             rotation2: SIMD4<Float>(columns.2, 0),
+            rotationTop0: SIMD4<Float>(topColumns.0, 0),
+            rotationTop1: SIMD4<Float>(topColumns.1, 0),
+            rotationTop2: SIMD4<Float>(topColumns.2, 0),
+            rotationBottom0: SIMD4<Float>(bottomColumns.0, 0),
+            rotationBottom1: SIMD4<Float>(bottomColumns.1, 0),
+            rotationBottom2: SIMD4<Float>(bottomColumns.2, 0),
             sourceSize: sourceSize,
             destinationSize: destinationSize,
             centerNormalized: SIMD2(Float(settings.centerX), Float(settings.centerY)),
@@ -282,14 +302,19 @@ struct FisheyeCameraPreview: UIViewRepresentable {
         view.framebufferOnly = true
         view.isPaused = false
         view.enableSetNeedsDisplay = false
-        view.preferredFramesPerSecond = 30
+        view.preferredFramesPerSecond = 60
         view.clearColor = MTLClearColor(red: 0.025, green: 0.035, blue: 0.04, alpha: 1)
         view.layer.cornerRadius = 22
         view.layer.masksToBounds = true
 
         camera.onFrame = { [weak renderer = context.coordinator.renderer] frame, presentationTime in
             renderer?.setFrame(frame, presentationTime: presentationTime)
-            machineLock.process(frame)
+            let pose = gimbalLock.renderTransform(forFrameAt: presentationTime.seconds)
+            machineLock.process(
+                frame,
+                presentationTime: presentationTime.seconds,
+                gimbalTransform: pose
+            )
         }
         camera.onAudioSample = { [weak recorder] sampleBuffer in
             recorder?.appendAudioSample(sampleBuffer)

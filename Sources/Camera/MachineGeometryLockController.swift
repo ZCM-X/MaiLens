@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreML
 import CoreVideo
 import Foundation
+import simd
 import Vision
 
 enum MachineGeometryLockStatus: Equatable {
@@ -82,6 +83,10 @@ final class MachineGeometryLockController: ObservableObject {
     private var smoothedZoom: CGFloat = 1
     private var smoothedStretchX: CGFloat = 1
     private var smoothedStretchY: CGFloat = 1
+    private var referenceTargetSize: CGFloat?
+    private var referenceZoom: CGFloat = 1
+    private var lastFramingTimestamp: TimeInterval?
+    private var lastContourRefinementFrame = 0
     private var lastPublishedStatus: MachineGeometryLockStatus = .searching
 
     init() {
@@ -150,7 +155,11 @@ final class MachineGeometryLockController: ObservableObject {
         }
     }
 
-    func process(_ pixelBuffer: CVPixelBuffer) {
+    func process(
+        _ pixelBuffer: CVPixelBuffer,
+        presentationTime: TimeInterval,
+        gimbalTransform: DigitalGimbalTransform
+    ) {
         frameGate.lock()
         guard !framePending else {
             frameGate.unlock()
@@ -161,7 +170,7 @@ final class MachineGeometryLockController: ObservableObject {
         visionQueue.async { [weak self] in
             guard let self else { return }
             if self.running, self.enabledValue {
-                self.processFrame(pixelBuffer)
+                self.processFrame(pixelBuffer, presentationTime: presentationTime, gimbalTransform: gimbalTransform)
             }
             self.frameGate.lock()
             self.framePending = false
@@ -169,25 +178,44 @@ final class MachineGeometryLockController: ObservableObject {
         }
     }
 
-    private func processFrame(_ pixelBuffer: CVPixelBuffer) {
+    private func processFrame(
+        _ pixelBuffer: CVPixelBuffer,
+        presentationTime: TimeInterval,
+        gimbalTransform: DigitalGimbalTransform
+    ) {
         frameCounter &+= 1
+        gimbal = gimbalTransform
         sourceSize = CGSize(
             width: CVPixelBufferGetWidth(pixelBuffer),
             height: CVPixelBufferGetHeight(pixelBuffer)
         )
 
+        // Core ML is sampled below the display rate. Vision's tracker carries
+        // the target between detections, so model work cannot stall rendering.
         let needsDetection = detector.isAvailable
-            ? trackingRequest == nil || frameCounter % 8 == 0 || lostFrameCount > 0
-            : trackingRequest == nil || frameCounter % 6 == 0 || lostFrameCount > 0
+            ? trackingRequest == nil || frameCounter % 12 == 0 || lostFrameCount > 0
+            : trackingRequest == nil || frameCounter % 8 == 0 || lostFrameCount > 0
 
         if needsDetection, let detection = detectGeometry(in: pixelBuffer) {
             beginTracking(outer: detection.outer, inner: detection.inner)
-            updateFraming(outer: detection.outer, inner: detection.inner)
+            updateFraming(
+                outer: detection.outer,
+                inner: detection.inner,
+                gimbalTransform: gimbalTransform,
+                presentationTime: presentationTime
+            )
             publishStatus(.tracking)
             return
         }
 
-        if advanceTracker(on: pixelBuffer) {
+        // The preview itself runs at 60 fps. Updating a Vision object tracker
+        // on every camera callback adds no useful information at this scale;
+        // 30 tracker updates per second leave the renderer free for the
+        // optical correction and avoid the hitch seen while lining up the
+        // machine.
+        guard frameCounter % 2 == 0 else { return }
+
+        if advanceTracker(on: pixelBuffer, gimbalTransform: gimbalTransform, presentationTime: presentationTime) {
             publishStatus(.tracking)
         } else if trackingRequest == nil {
             publishStatus(.searching)
@@ -205,16 +233,26 @@ final class MachineGeometryLockController: ObservableObject {
         // refinement stage inside the outer ROI and is only accepted when it
         // agrees with the detector, preventing one high-contrast edge from
         // moving the crop by itself.
-        let refinedInner = refineInnerEllipse(
-            in: pixelBuffer,
-            outer: raw.outer,
-            predictedInner: raw.inner
-        ) ?? raw.inner
+        let refinedInner: CGRect
+        if frameCounter - lastContourRefinementFrame >= 30 {
+            refinedInner = refineInnerEllipse(
+                in: pixelBuffer,
+                outer: raw.outer,
+                predictedInner: raw.inner
+            ) ?? raw.inner
+            lastContourRefinementFrame = frameCounter
+        } else {
+            refinedInner = raw.inner
+        }
         guard isPlausiblePair(outer: raw.outer, inner: refinedInner) else { return nil }
         return GeometryDetection(outer: raw.outer, inner: refinedInner)
     }
 
-    private func advanceTracker(on pixelBuffer: CVPixelBuffer) -> Bool {
+    private func advanceTracker(
+        on pixelBuffer: CVPixelBuffer,
+        gimbalTransform: DigitalGimbalTransform,
+        presentationTime: TimeInterval
+    ) -> Bool {
         guard let request = trackingRequest else { return false }
         do {
             try sequenceHandler.perform([request], on: pixelBuffer)
@@ -247,7 +285,12 @@ final class MachineGeometryLockController: ObservableObject {
             lastOuterBox = trackedOuter
             lastInnerBox = trackedInner
             lostFrameCount = 0
-            updateFraming(outer: trackedOuter, inner: trackedInner)
+            updateFraming(
+                outer: trackedOuter,
+                inner: trackedInner,
+                gimbalTransform: gimbalTransform,
+                presentationTime: presentationTime
+            )
             return true
         } catch {
             handleTrackingLoss()
@@ -265,25 +308,25 @@ final class MachineGeometryLockController: ObservableObject {
         lostFrameCount = 0
     }
 
-    private func updateFraming(outer: CGRect, inner: CGRect) {
+    private func updateFraming(
+        outer: CGRect,
+        inner: CGRect,
+        gimbalTransform: DigitalGimbalTransform,
+        presentationTime: TimeInterval
+    ) {
         let outerTopLeft = visionToTopLeft(outer)
         let innerTopLeft = visionToTopLeft(inner)
         guard isPlausiblePair(outer: outerTopLeft, inner: innerTopLeft) else { return }
 
         let mappedOuter = mapRectified(outerTopLeft)
         let mappedInner = mapRectified(innerTopLeft)
-        let center = CGPoint(x: mappedInner.midX, y: mappedInner.midY)
-
-        // Detector boxes are normalized to the source image. Correct for the
-        // current virtual-gimbal pose before storing the target in the locked
-        // coordinate system; the shader then applies the pose to every ray.
-        let gimbalOffset = gimbal.cropOffset(
-            horizontalFOV: settings.horizontalFOV,
-            previewSize: previewSize
-        )
-        let lockedCenter = CGPoint(
-            x: center.x - gimbalOffset.x,
-            y: center.y - gimbalOffset.y
+        // Convert the measured camera ray into the gimbal's latched coordinate
+        // system with the exact pose belonging to this camera frame. The old
+        // yaw/pitch tangent offset was only a small-angle approximation and
+        // produced a persistent off-centre lock under roll and diagonal motion.
+        let lockedCenter = lockedPoint(
+            fromCameraPoint: CGPoint(x: mappedInner.midX, y: mappedInner.midY),
+            transform: gimbalTransform
         )
 
         let targetSize = max(
@@ -294,24 +337,37 @@ final class MachineGeometryLockController: ObservableObject {
 
         let aspect = previewSize.width * max(mappedInner.width, 0.001)
             / max(previewSize.height * mappedInner.height, 0.001)
-        let desiredStretchX = min(max(aspect, 0.90), 1.10)
+        let desiredStretchX = min(max(aspect, 0.96), 1.04)
         let desiredStretchY: CGFloat = 1
-        let horizonFill = max(
-            abs(cos(horizonRadians)) + abs(sin(horizonRadians)) / max(previewSize.width / max(previewSize.height, 1), 0.01),
-            abs(cos(horizonRadians)) + abs(sin(horizonRadians)) * previewSize.width / max(previewSize.height, 1)
-        )
-        let desiredZoom = min(
-            max(0.72 / (max(targetSize, 0.06) * max(horizonFill, 1)), 0.78),
-            2.8
-        )
+        if referenceTargetSize == nil {
+            referenceTargetSize = targetSize
+            referenceZoom = smoothedZoom
+        }
+        let targetAtLock = max(referenceTargetSize ?? targetSize, 0.04)
+        // A phone moving closer makes the inner screen larger in the image;
+        // reduce digital zoom by the same ratio. Moving backwards does the
+        // inverse. Latching this ratio at acquisition preserves the user's
+        // chosen composition instead of snapping to an arbitrary fill value.
+        let desiredZoom = min(max(referenceZoom * targetAtLock / targetSize, 0.72), 2.8)
+
+        let deltaTime: CGFloat
+        if let previousTime = lastFramingTimestamp,
+           presentationTime.isFinite, presentationTime > previousTime {
+            deltaTime = min(max(CGFloat(presentationTime - previousTime), 1.0 / 120.0), 0.15)
+        } else {
+            deltaTime = 1.0 / 30.0
+        }
+        lastFramingTimestamp = presentationTime.isFinite ? presentationTime : nil
+        let centerAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.13))
+        let zoomAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.32))
 
         smoothedCenter = CGPoint(
-            x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * 0.20,
-            y: smoothedCenter.y + (lockedCenter.y - smoothedCenter.y) * 0.20
+            x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * centerAlpha,
+            y: smoothedCenter.y + (lockedCenter.y - smoothedCenter.y) * centerAlpha
         )
-        smoothedZoom += (desiredZoom - smoothedZoom) * 0.10
-        smoothedStretchX += (desiredStretchX - smoothedStretchX) * 0.08
-        smoothedStretchY += (desiredStretchY - smoothedStretchY) * 0.08
+        smoothedZoom += (desiredZoom - smoothedZoom) * zoomAlpha
+        smoothedStretchX += (desiredStretchX - smoothedStretchX) * zoomAlpha
+        smoothedStretchY += (desiredStretchY - smoothedStretchY) * zoomAlpha
 
         let current = MachineGeometryFraming(
             center: smoothedCenter,
@@ -362,10 +418,30 @@ final class MachineGeometryLockController: ObservableObject {
         lastInnerBox = nil
         lostFrameCount = 0
         frameCounter = 0
+        lastContourRefinementFrame = 0
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedZoom = 1
         smoothedStretchX = 1
         smoothedStretchY = 1
+        referenceTargetSize = nil
+        referenceZoom = 1
+        lastFramingTimestamp = nil
+    }
+
+    private func lockedPoint(fromCameraPoint point: CGPoint, transform: DigitalGimbalTransform) -> CGPoint {
+        guard transform.isActive,
+              previewSize.width > 0,
+              previewSize.height > 0 else { return point }
+        let focal = previewSize.width / (2 * tan(CGFloat(settings.horizontalFOV * .pi / 180) * 0.5))
+        let x = (point.x - 0.5) * previewSize.width / max(focal, 1)
+        let y = (point.y - 0.5) * previewSize.height / max(focal, 1)
+        let sourceRay = simd_normalize(SIMD3<Float>(Float(x), Float(y), 1))
+        let inverse = transform.cameraFromLocked.inverse
+        let lockedRay = simd_normalize(inverse * sourceRay)
+        guard abs(lockedRay.z) > 0.05 else { return point }
+        let lockedX = CGFloat(lockedRay.x / lockedRay.z) * focal / previewSize.width + 0.5
+        let lockedY = CGFloat(lockedRay.y / lockedRay.z) * focal / previewSize.height + 0.5
+        return CGPoint(x: lockedX, y: lockedY)
     }
 
     private func publishFraming(_ next: MachineGeometryFraming) {

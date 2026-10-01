@@ -61,6 +61,14 @@ struct DigitalGimbalTransform {
     }
 }
 
+struct DigitalGimbalFramePoses {
+    var top: DigitalGimbalTransform
+    var center: DigitalGimbalTransform
+    var bottom: DigitalGimbalTransform
+
+    static let identity = DigitalGimbalFramePoses(top: .identity, center: .identity, bottom: .identity)
+}
+
 private struct MotionSample {
     var timestamp: TimeInterval
     var relativeDeviceQuaternion: simd_quatf
@@ -193,14 +201,35 @@ final class GimbalLockController: ObservableObject {
     /// AVCaptureVideoDataOutput run at different cadences; interpolating the
     /// short history avoids alternating old/new poses on the preview.
     func renderTransform(forFrameAt frameTime: TimeInterval) -> DigitalGimbalTransform {
+        renderPoses(forFrameAt: frameTime, readoutDuration: 0).center
+    }
+
+    /// Rolling-shutter compensation needs the camera pose at different sensor
+    /// rows. A single frame pose leaves fast rotations sheared across the image
+    /// even though the centre ray is stabilized.
+    func renderPoses(
+        forFrameAt frameTime: TimeInterval,
+        readoutDuration: TimeInterval = 0.008
+    ) -> DigitalGimbalFramePoses {
         stateLock.lock()
+        defer { stateLock.unlock() }
         guard hasSample else {
-            stateLock.unlock()
             return .identity
         }
+        let halfReadout = max(readoutDuration, 0) * 0.5
+        let center = renderTransformLocked(forFrameAt: frameTime)
+        let top = halfReadout > 0
+            ? renderTransformLocked(forFrameAt: frameTime - halfReadout)
+            : center
+        let bottom = halfReadout > 0
+            ? renderTransformLocked(forFrameAt: frameTime + halfReadout)
+            : center
+        return DigitalGimbalFramePoses(top: top, center: center, bottom: bottom)
+    }
 
-        let usable = frameTime.isFinite && frameTime > 0
-            && abs(frameTime - lastTimestamp) < 1.0
+    /// Must be called with `stateLock` held.
+    private func renderTransformLocked(forFrameAt frameTime: TimeInterval) -> DigitalGimbalTransform {
+        let usable = frameTime.isFinite && frameTime > 0 && abs(frameTime - lastTimestamp) < 1.0
         let requested = usable ? frameTime : lastTimestamp
         let sample = usable ? sampleLocked(at: requested) : MotionSample(
             timestamp: lastTimestamp,
@@ -208,15 +237,15 @@ final class GimbalLockController: ObservableObject {
             lockVersion: lockVersion
         )
         let active = gimbalEnabledValue
-        let gimbalActive = gimbalEnabledValue
         let matrix = active
             ? cameraToDevice * simd_float3x3(sample.relativeDeviceQuaternion) * cameraToDevice
             : matrix_identity_float3x3
-        stateLock.unlock()
-        return DigitalGimbalTransform(cameraFromLocked: matrix,
-                                      timestamp: sample.timestamp,
-                                      isActive: active,
-                                      gimbalActive: gimbalActive)
+        return DigitalGimbalTransform(
+            cameraFromLocked: matrix,
+            timestamp: sample.timestamp,
+            isActive: active,
+            gimbalActive: gimbalEnabledValue
+        )
     }
 
     private func consume(_ deviceMotion: CMDeviceMotion) {
