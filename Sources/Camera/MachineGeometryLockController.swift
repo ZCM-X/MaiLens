@@ -218,13 +218,10 @@ final class MachineGeometryLockController: ObservableObject {
             }
         }
 
-        // The preview itself runs at 60 fps. Updating a Vision object tracker
-        // on every camera callback adds no useful information at this scale;
-        // 30 tracker updates per second leave the renderer free for the
-        // optical correction and avoid the hitch seen while lining up the
-        // machine.
-        guard frameCounter % 2 == 0 else { return }
-
+        // Track every camera frame. The previous half-rate gate cut a typical
+        // 30 fps camera feed to 15 tracking updates per second, making the crop
+        // visibly chase the machine in steps. Vision runs on this serial queue;
+        // the camera callback never waits for tracking to finish.
         if advanceTracker(on: pixelBuffer, gimbalTransform: gimbalTransform, presentationTime: presentationTime) {
             hasAcquiredLock = true
             lastSuccessfulTrackingTime = presentationTime
@@ -261,8 +258,8 @@ final class MachineGeometryLockController: ObservableObject {
         guard let previousOuter = lastOuterBox,
               let previousInner = lastInnerBox else { return detection }
         return GeometryDetection(
-            outer: stabilizedBox(detection.outer, against: previousOuter, alpha: 0.48),
-            inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.42)
+            outer: stabilizedBox(detection.outer, against: previousOuter, alpha: 0.28),
+            inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.24)
         )
     }
 
@@ -328,7 +325,7 @@ final class MachineGeometryLockController: ObservableObject {
 
             request.inputObservation = observation
             let previousOuter = lastOuterBox ?? observation.boundingBox
-            let trackedOuter = stabilizedBox(observation.boundingBox, against: previousOuter, alpha: 0.42)
+            let trackedOuter = stabilizedBox(observation.boundingBox, against: previousOuter, alpha: 0.82)
             let trackedInner: CGRect
             if let previousInner = lastInnerBox {
                 let oldCenter = CGPoint(x: previousOuter.midX, y: previousOuter.midY)
@@ -434,8 +431,10 @@ final class MachineGeometryLockController: ObservableObject {
             deltaTime = 1.0 / 30.0
         }
         lastFramingTimestamp = presentationTime.isFinite ? presentationTime : nil
-        let centerAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.13))
-        let zoomAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.32))
+        // Keep enough filtering to suppress tracker noise without the visible
+        // follow-behind caused by the former 130/320 ms time constants.
+        let centerAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.045))
+        let zoomAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.12))
 
         smoothedCenter = CGPoint(
             x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * centerAlpha,
