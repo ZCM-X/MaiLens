@@ -284,9 +284,16 @@ enum ButtonRingSampler {
         guard width > 2, height > 2 else { return reading }
 
         func isPurple(at source: CGPoint) -> Bool {
-            let x = Int((source.x * CGFloat(width)).rounded())
-            let y = Int((source.y * CGFloat(height)).rounded())
-            guard x >= 0, x < width, y >= 0, y < height else { return false }
+            // Bounds are checked in floating point: Int(_:) traps on NaN and
+            // on anything outside its range, and this runs on every camera
+            // frame inside the capture pipeline.
+            let column = source.x * CGFloat(width)
+            let row = source.y * CGFloat(height)
+            guard column.isFinite, row.isFinite,
+                  column >= 0, column < CGFloat(width),
+                  row >= 0, row < CGFloat(height) else { return false }
+            let x = Int(column.rounded())
+            let y = Int(row.rounded())
             let pixel = base.advanced(by: y * bytesPerRow + x * 4)
                 .assumingMemoryBound(to: UInt8.self)
             let blue = Int(pixel[0])
