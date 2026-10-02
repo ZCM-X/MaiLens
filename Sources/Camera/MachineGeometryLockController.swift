@@ -82,7 +82,11 @@ final class MachineGeometryLockController: ObservableObject {
     private var hasAcquiredLock = false
     private var lastDetectionPresentationTime: TimeInterval?
     private var lastSuccessfulTrackingTime: TimeInterval?
-    private var trackingRequest: VNTrackObjectRequest?
+    private var outerTrackingRequest: VNTrackObjectRequest?
+    private var innerTrackingRequest: VNTrackObjectRequest?
+    private var hasTrackingPair: Bool {
+        outerTrackingRequest != nil && innerTrackingRequest != nil
+    }
     private var lastOuterBox: CGRect?
     private var lastInnerBox: CGRect?
     private var settings = LensCorrectionSettings.preliminary
@@ -204,17 +208,19 @@ final class MachineGeometryLockController: ObservableObject {
         if shouldRunDetection(at: presentationTime),
            let detection = detectGeometry(in: pixelBuffer) {
             let stable = stabilizedDetection(detection)
-            if updateFraming(
-                outer: stable.outer,
-                inner: stable.inner,
-                gimbalTransform: gimbalTransform,
-                presentationTime: presentationTime
-            ) {
-                beginTracking(outer: stable.outer, inner: stable.inner)
-                hasAcquiredLock = true
-                lastSuccessfulTrackingTime = presentationTime
-                publishStatus(.tracking)
-                return
+            if lostFrameCount > 0 || needsDetectorCorrection(stable) || !hasTrackingPair {
+                if updateFraming(
+                    outer: stable.outer,
+                    inner: stable.inner,
+                    gimbalTransform: gimbalTransform,
+                    presentationTime: presentationTime
+                ) {
+                    beginTracking(outer: stable.outer, inner: stable.inner)
+                    hasAcquiredLock = true
+                    lastSuccessfulTrackingTime = presentationTime
+                    publishStatus(.tracking)
+                    return
+                }
             }
         }
 
@@ -234,7 +240,7 @@ final class MachineGeometryLockController: ObservableObject {
     private func shouldRunDetection(at presentationTime: TimeInterval) -> Bool {
         guard detector.isAvailable else { return false }
         let interval: TimeInterval
-        if trackingRequest == nil {
+        if !hasTrackingPair {
             interval = 0.22
         } else if lostFrameCount > 0 {
             interval = 0.14
@@ -243,7 +249,7 @@ final class MachineGeometryLockController: ObservableObject {
         }
 
         guard presentationTime.isFinite else {
-            return frameCounter % (trackingRequest == nil ? 8 : 12) == 0
+            return frameCounter % (hasTrackingPair ? 12 : 8) == 0
         }
         if let previous = lastDetectionPresentationTime,
            presentationTime >= previous,
@@ -261,6 +267,28 @@ final class MachineGeometryLockController: ObservableObject {
             outer: stabilizedBox(detection.outer, against: previousOuter, alpha: 0.28),
             inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.24)
         )
+    }
+
+    private func needsDetectorCorrection(_ detection: GeometryDetection) -> Bool {
+        guard hasTrackingPair,
+              let previousOuter = lastOuterBox,
+              let previousInner = lastInnerBox else { return true }
+
+        let outerCenterError = hypot(
+            (detection.outer.midX - previousOuter.midX) / max(previousOuter.width, 0.001),
+            (detection.outer.midY - previousOuter.midY) / max(previousOuter.height, 0.001)
+        )
+        let innerCenterError = hypot(
+            (detection.inner.midX - previousInner.midX) / max(previousOuter.width, 0.001),
+            (detection.inner.midY - previousInner.midY) / max(previousOuter.height, 0.001)
+        )
+        let outerScaleError = max(
+            abs(log(max(detection.outer.width, 0.001) / max(previousOuter.width, 0.001))),
+            abs(log(max(detection.outer.height, 0.001) / max(previousOuter.height, 0.001)))
+        )
+        // Ignore tiny low-rate detector fluctuations while both optical tracks
+        // agree. Re-anchor only after measurable geometric drift accumulates.
+        return outerCenterError > 0.035 || innerCenterError > 0.035 || outerScaleError > 0.08
     }
 
     private func updateStatusAfterMiss(presentationTime: TimeInterval) {
@@ -312,35 +340,28 @@ final class MachineGeometryLockController: ObservableObject {
         gimbalTransform: DigitalGimbalTransform,
         presentationTime: TimeInterval
     ) -> Bool {
-        guard let request = trackingRequest else { return false }
+        guard let outerRequest = outerTrackingRequest,
+              let innerRequest = innerTrackingRequest else { return false }
         do {
-            try sequenceHandler.perform([request], on: pixelBuffer)
-            guard let observation = request.results?.first as? VNDetectedObjectObservation,
-                  observation.confidence >= 0.16,
-                  observation.boundingBox.width > 0.03,
-                  observation.boundingBox.height > 0.03 else {
+            try sequenceHandler.perform([outerRequest, innerRequest], on: pixelBuffer)
+            guard let outerObservation = outerRequest.results?.first as? VNDetectedObjectObservation,
+                  let innerObservation = innerRequest.results?.first as? VNDetectedObjectObservation,
+                  outerObservation.confidence >= 0.16,
+                  innerObservation.confidence >= 0.16,
+                  outerObservation.boundingBox.width > 0.03,
+                  outerObservation.boundingBox.height > 0.03,
+                  innerObservation.boundingBox.width > 0.03,
+                  innerObservation.boundingBox.height > 0.03 else {
                 handleTrackingLoss()
                 return false
             }
 
-            request.inputObservation = observation
-            let previousOuter = lastOuterBox ?? observation.boundingBox
-            let trackedOuter = stabilizedBox(observation.boundingBox, against: previousOuter, alpha: 0.82)
-            let trackedInner: CGRect
-            if let previousInner = lastInnerBox {
-                let oldCenter = CGPoint(x: previousOuter.midX, y: previousOuter.midY)
-                let newCenter = CGPoint(x: trackedOuter.midX, y: trackedOuter.midY)
-                let scaleX = trackedOuter.width / max(previousOuter.width, 0.001)
-                let scaleY = trackedOuter.height / max(previousOuter.height, 0.001)
-                trackedInner = CGRect(
-                    x: newCenter.x + (previousInner.minX - oldCenter.x) * scaleX,
-                    y: newCenter.y + (previousInner.minY - oldCenter.y) * scaleY,
-                    width: previousInner.width * scaleX,
-                    height: previousInner.height * scaleY
-                )
-            } else {
-                trackedInner = inset(trackedOuter, fraction: 0.20)
-            }
+            outerRequest.inputObservation = outerObservation
+            innerRequest.inputObservation = innerObservation
+            let previousOuter = lastOuterBox ?? outerObservation.boundingBox
+            let previousInner = lastInnerBox ?? innerObservation.boundingBox
+            let trackedOuter = stabilizedBox(outerObservation.boundingBox, against: previousOuter, alpha: 0.82)
+            let trackedInner = stabilizedBox(innerObservation.boundingBox, against: previousInner, alpha: 0.82)
             guard updateFraming(
                 outer: trackedOuter,
                 inner: trackedInner,
@@ -361,10 +382,16 @@ final class MachineGeometryLockController: ObservableObject {
     }
 
     private func beginTracking(outer: CGRect, inner: CGRect) {
-        trackingRequest = VNTrackObjectRequest(
+        let outerRequest = VNTrackObjectRequest(
             detectedObjectObservation: VNDetectedObjectObservation(boundingBox: outer)
         )
-        trackingRequest?.trackingLevel = .accurate
+        let innerRequest = VNTrackObjectRequest(
+            detectedObjectObservation: VNDetectedObjectObservation(boundingBox: inner)
+        )
+        outerRequest.trackingLevel = .accurate
+        innerRequest.trackingLevel = .accurate
+        outerTrackingRequest = outerRequest
+        innerTrackingRequest = innerRequest
         lastOuterBox = outer
         lastInnerBox = inner
         lostFrameCount = 0
@@ -463,7 +490,8 @@ final class MachineGeometryLockController: ObservableObject {
         lostFrameCount += 1
         guard lostFrameCount > 45 else { return }
 
-        trackingRequest = nil
+        outerTrackingRequest = nil
+        innerTrackingRequest = nil
         lastOuterBox = nil
         lastInnerBox = nil
         // Keep the last framing while reacquiring. Returning to identity here
@@ -472,7 +500,8 @@ final class MachineGeometryLockController: ObservableObject {
     }
 
     private func resetTracking() {
-        trackingRequest = nil
+        outerTrackingRequest = nil
+        innerTrackingRequest = nil
         lastOuterBox = nil
         lastInnerBox = nil
         lostFrameCount = 0
@@ -575,10 +604,6 @@ final class MachineGeometryLockController: ObservableObject {
             width: previous.width + (current.width - previous.width) * alpha,
             height: previous.height + (current.height - previous.height) * alpha
         )
-    }
-
-    private func inset(_ box: CGRect, fraction: CGFloat) -> CGRect {
-        box.insetBy(dx: box.width * fraction, dy: box.height * fraction)
     }
 
     /// Fits an ellipse-like contour using the point covariance, then blends
