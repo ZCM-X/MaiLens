@@ -261,7 +261,7 @@ struct ContentView: View {
                     .background(.white.opacity(0.08), in: Capsule())
             }
 
-            Text("同时检测外键区和内屏：用内屏中心定位，外键框校正中心并决定缩放范围，随后把机台保持在画面中央。短时漏检会保留上一次构图。")
+            Text("同时检测外键区和内屏并交叉校验：内屏正中心作为锁定锚点，外键框决定裁切和缩放；短时漏检会保留构图并继续重试。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)

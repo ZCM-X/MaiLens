@@ -204,17 +204,18 @@ final class MachineGeometryLockController: ObservableObject {
         if shouldRunDetection(at: presentationTime),
            let detection = detectGeometry(in: pixelBuffer) {
             let stable = stabilizedDetection(detection)
-            beginTracking(outer: stable.outer, inner: stable.inner)
-            hasAcquiredLock = true
-            lastSuccessfulTrackingTime = presentationTime
-            updateFraming(
+            if updateFraming(
                 outer: stable.outer,
                 inner: stable.inner,
                 gimbalTransform: gimbalTransform,
                 presentationTime: presentationTime
-            )
-            publishStatus(.tracking)
-            return
+            ) {
+                beginTracking(outer: stable.outer, inner: stable.inner)
+                hasAcquiredLock = true
+                lastSuccessfulTrackingTime = presentationTime
+                publishStatus(.tracking)
+                return
+            }
         }
 
         // The preview itself runs at 60 fps. Updating a Vision object tracker
@@ -278,8 +279,9 @@ final class MachineGeometryLockController: ObservableObject {
         } else {
             missDuration = Double(lostFrameCount) / 30.0
         }
-        // A single bad tracker update should not make the lock indicator flash.
-        if missDuration >= 0.45 {
+        // Keep the lock state stable through brief detector/tracker gaps. The
+        // last framing remains active while the detector reacquires the pair.
+        if missDuration >= 0.90 {
             publishStatus(.lost)
         }
     }
@@ -342,15 +344,18 @@ final class MachineGeometryLockController: ObservableObject {
             } else {
                 trackedInner = inset(trackedOuter, fraction: 0.20)
             }
-            lastOuterBox = trackedOuter
-            lastInnerBox = trackedInner
-            lostFrameCount = 0
-            updateFraming(
+            guard updateFraming(
                 outer: trackedOuter,
                 inner: trackedInner,
                 gimbalTransform: gimbalTransform,
                 presentationTime: presentationTime
-            )
+            ) else {
+                handleTrackingLoss()
+                return false
+            }
+            lastOuterBox = trackedOuter
+            lastInnerBox = trackedInner
+            lostFrameCount = 0
             return true
         } catch {
             handleTrackingLoss()
@@ -373,29 +378,26 @@ final class MachineGeometryLockController: ObservableObject {
         inner: CGRect,
         gimbalTransform: DigitalGimbalTransform,
         presentationTime: TimeInterval
-    ) {
+    ) -> Bool {
         let outerTopLeft = visionToTopLeft(outer)
         let innerTopLeft = visionToTopLeft(inner)
-        guard isPlausiblePair(outer: outerTopLeft, inner: innerTopLeft) else { return }
+        guard isPlausiblePair(outer: outerTopLeft, inner: innerTopLeft) else { return false }
 
         let mappedOuter = mapRectified(outerTopLeft)
         let mappedInner = mapRectified(innerTopLeft)
-        // Reconcile both detections: the inner screen gives the precise screen
-        // centre, while the surrounding button ring corrects detector bias.
-        // Bound the correction so an imperfect outer box cannot pull the
-        // calibrated screen centre away from the actual display.
+        // The paired boxes cross-check the machine geometry: the inner box must
+        // remain inside the outer button frame, the inner screen defines the
+        // exact lock point, and the outer frame defines the crop and zoom.
+        let rectifiedIntersection = mappedOuter.intersection(mappedInner)
+        let rectifiedInnerArea = mappedInner.width * mappedInner.height
+        guard !rectifiedIntersection.isNull,
+              rectifiedInnerArea > 0,
+              rectifiedIntersection.width * rectifiedIntersection.height / rectifiedInnerArea > 0.68 else {
+            return false
+        }
         let screenCenter = CGPoint(x: mappedInner.midX, y: mappedInner.midY)
-        let buttonRingCenter = CGPoint(x: mappedOuter.midX, y: mappedOuter.midY)
-        let correctionX = min(max(buttonRingCenter.x - screenCenter.x,
-                                  -mappedOuter.width * 0.12), mappedOuter.width * 0.12) * 0.30
-        let correctionY = min(max(buttonRingCenter.y - screenCenter.y,
-                                  -mappedOuter.height * 0.12), mappedOuter.height * 0.12) * 0.30
-        let calibratedScreenCenter = CGPoint(
-            x: screenCenter.x + correctionX,
-            y: screenCenter.y + correctionY
-        )
         let lockedCenter = lockedPoint(
-            fromCameraPoint: calibratedScreenCenter,
+            fromCameraPoint: screenCenter,
             transform: gimbalTransform
         )
 
@@ -405,7 +407,7 @@ final class MachineGeometryLockController: ObservableObject {
             mappedOuter.width,
             mappedOuter.height * previewSize.height / max(previewSize.width, 1)
         )
-        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return }
+        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return false }
 
         let aspect = previewSize.width * max(mappedInner.width, 0.001)
             / max(previewSize.height * mappedInner.height, 0.001)
@@ -455,6 +457,7 @@ final class MachineGeometryLockController: ObservableObject {
             bottomGap: max(outerTopLeft.maxY - innerTopLeft.maxY, 0)
         )
         publishFraming(current)
+        return true
     }
 
     private func handleTrackingLoss() {
