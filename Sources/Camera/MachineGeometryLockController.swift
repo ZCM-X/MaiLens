@@ -465,7 +465,7 @@ final class MachineGeometryLockController: ObservableObject {
               rectifiedIntersection.width * rectifiedIntersection.height / rectifiedInnerArea > 0.68 else {
             return false
         }
-        let cameraScreenCenter = detectedScreenEllipse.map(mapRectifiedPoint)
+        let cameraScreenCenter = detectedScreenEllipse.map { mapRectifiedPoint($0.center) }
             ?? CGPoint(x: mappedInner.midX, y: mappedInner.midY)
         let lockedCenter = lockedPoint(
             fromCameraPoint: cameraScreenCenter,
