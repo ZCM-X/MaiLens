@@ -24,6 +24,10 @@ targets:
       - path: Sources
       - path: Resources
         buildPhase: resources
+        excludes:
+          - FrameGeometryDetector.mlpackage
+      - path: Resources/FrameGeometryDetector.mlpackage
+        buildPhase: sources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mailens.app

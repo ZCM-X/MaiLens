@@ -35,9 +35,10 @@ Build a mixed dataset with sampled frames from that video:
 Review `work/machine-yolo-video/pseudo-label-preview.jpg`, then train it with
 `--data work/machine-yolo-video/dataset.yaml`. The repository contains the
 resulting small detector at `Training/models/machine-lock-yolo11n-video.pt`.
-The CodeMagic workflow exports the two-class frame-geometry detector to
-`Resources/FrameGeometryDetector.mlpackage` with a macOS-compatible pinned
-environment before XcodeGen runs. The app loads it through Vision at runtime;
+The CodeMagic workflow exports the two-class frame-geometry detector as a
+Core ML source package. Xcode compiles it to `FrameGeometryDetector.mlmodelc`
+for the iOS archive, and the workflow verifies that the compiled model is
+bundled in the archived app. The app loads it through Vision at runtime;
 the virtual gimbal and geometry crop are independent switches, so the latter
 can be tested without changing the IMU lock.
 
@@ -46,5 +47,5 @@ can be tested without changing the IMU lock.
 The app's current Core ML model is `Training/models/frame-geometry-yolo11n-v5.pt`
 with the matching ONNX reference. It is the PC v5 checkpoint fine-tuned using
 corrected raw iPhone fisheye frames. The CodeMagic workflow exports this v5
-weight to `Resources/FrameGeometryDetector.mlpackage`; the app accepts its
-`outer_buttons` and `inner_screen` class names directly.
+weight as a Core ML source package, which Xcode compiles for iOS. The app
+accepts its `outer_buttons` and `inner_screen` class names directly.

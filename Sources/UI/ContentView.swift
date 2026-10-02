@@ -159,10 +159,14 @@ struct ContentView: View {
             }
             .overlay(alignment: .bottomLeading) {
                 if machineLock.isEnabled {
-                    Label(machineLock.status.title,
-                          systemImage: machineLock.status == .tracking ? "scope" : "viewfinder")
+                    Label(machineLock.previewStatusTitle,
+                          systemImage: machineLock.detectorAvailable
+                            ? (machineLock.status == .tracking ? "scope" : "viewfinder")
+                            : "exclamationmark.triangle.fill")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(machineLock.status == .tracking ? Color.mint : Color.white)
+                        .foregroundStyle(machineLock.detectorAvailable && machineLock.status == .tracking
+                                         ? Color.mint
+                                         : (machineLock.detectorAvailable ? Color.white : Color.orange))
                         .padding(.horizontal, 11)
                         .padding(.vertical, 8)
                         .background(.black.opacity(0.62), in: Capsule())
@@ -249,7 +253,7 @@ struct ContentView: View {
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Spacer()
-                Text(machineLock.detectorAvailable ? "AI FRAME" : "等待模型")
+                Text(machineLock.detectorAvailable ? "AI 已加载" : "模型未加载")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(machineLock.detectorAvailable ? Color.mint : Color.orange)
                     .padding(.horizontal, 9)
@@ -257,10 +261,17 @@ struct ContentView: View {
                     .background(.white.opacity(0.08), in: Capsule())
             }
 
-            Text("自动检测机台外框和内屏，用连续检测、轮廓拟合与平滑裁切保持机台中心和距离稳定。谱面的 8 个判定点不会参与锁定。")
+            Text("同时检测外键区和内屏：用内屏中心定位，外键框校正中心并决定缩放范围，随后把机台保持在画面中央。短时漏检会保留上一次构图。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
+
+            if let detectorLoadMessage = machineLock.detectorLoadMessage {
+                Text(detectorLoadMessage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 10) {
                 Button {

@@ -25,8 +25,17 @@ def main() -> None:
     if not args.weights.exists():
         raise SystemExit(f"weights not found: {args.weights}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    model = YOLO(str(args.weights))
+    names = model.names
+    class_names = list(names.values()) if isinstance(names, dict) else list(names)
+    expected_names = ["outer_buttons", "inner_screen"]
+    if class_names != expected_names:
+        raise SystemExit(
+            f"unexpected detector classes: {class_names}; expected {expected_names}"
+        )
+
     exported = Path(
-        YOLO(str(args.weights)).export(
+        model.export(
             format="coreml",
             imgsz=640,
             nms=True,

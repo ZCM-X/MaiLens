@@ -11,7 +11,7 @@ workflows:
         script: brew install xcodegen
       - name: Install Metal Toolchain
         script: xcodebuild -downloadComponent MetalToolchain
-      - name: Export frame geometry detector to Core ML
+      - name: Export frame geometry detector
         script: |
           python3 -m venv .codemagic-mailens-python
           . .codemagic-mailens-python/bin/activate
@@ -25,10 +25,14 @@ workflows:
           python Training/export_coreml.py \
             --weights Training/models/frame-geometry-yolo11n-v5.pt \
             --output Resources/FrameGeometryDetector.mlpackage
+          rm -rf Resources/FrameGeometryDetector.mlmodelc
+          test -d Resources/FrameGeometryDetector.mlpackage
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml
       - name: Archive unsigned iOS app
-        script: xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS' -configuration Release -archivePath build/MaiLens.xcarchive -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO archive
+        script: |
+          xcodebuild -project MaiLens.xcodeproj -scheme MaiLens -destination 'generic/platform=iOS' -configuration Release -archivePath build/MaiLens.xcarchive -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO archive
+          test -d build/MaiLens.xcarchive/Products/Applications/MaiLens.app/FrameGeometryDetector.mlmodelc
       - name: Package unsigned IPA
         script: |
           mkdir -p build/ios/ipa/staging/Payload

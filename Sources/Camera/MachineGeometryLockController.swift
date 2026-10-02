@@ -14,9 +14,9 @@ enum MachineGeometryLockStatus: Equatable {
 
     var title: String {
         switch self {
-        case .searching: return "自动寻找机台"
-        case .tracking: return "机台已锁定"
-        case .lost: return "目标暂时丢失"
+        case .searching: return "正在检测机台"
+        case .tracking: return "机台居中锁定"
+        case .lost: return "短时漏检，保持构图"
         case .paused: return "自动锁定已暂停"
         }
     }
@@ -46,15 +46,23 @@ struct MachineGeometryFraming: Equatable {
     )
 }
 
-/// Runs the two-class outer-frame/inner-screen detector and turns its noisy
-/// boxes into a slow, gimbal-like crop. The eight gameplay judgement markers
-/// are deliberately not involved: they are user-specific chart coordinates,
-/// not physical geometry.
+/// Reconciles the detected outer button ring and inner screen, locks the
+/// calibrated screen centre, and sizes the crop from the outer ring. The eight
+/// gameplay judgement markers are not part of this physical geometry.
 final class MachineGeometryLockController: ObservableObject {
     @Published private(set) var status: MachineGeometryLockStatus = .searching
     @Published private(set) var isEnabled = true
     @Published private(set) var framing = MachineGeometryFraming.identity
     @Published private(set) var detectorAvailable = false
+    @Published private(set) var detectorLoadMessage: String?
+
+    var previewStatusTitle: String {
+        guard detectorAvailable else { return "机台模型未加载" }
+        if status == .tracking, framing.isActive {
+            return String(format: "机台居中 ×%.2f", framing.zoom)
+        }
+        return status.title
+    }
 
     /// Called on the Vision queue. The renderer copies the value immediately.
     var onFramingUpdate: ((MachineGeometryFraming) -> Void)?
@@ -71,6 +79,9 @@ final class MachineGeometryLockController: ObservableObject {
     private var enabledValue = true
     private var frameCounter = 0
     private var lostFrameCount = 0
+    private var hasAcquiredLock = false
+    private var lastDetectionPresentationTime: TimeInterval?
+    private var lastSuccessfulTrackingTime: TimeInterval?
     private var trackingRequest: VNTrackObjectRequest?
     private var lastOuterBox: CGRect?
     private var lastInnerBox: CGRect?
@@ -91,6 +102,7 @@ final class MachineGeometryLockController: ObservableObject {
 
     init() {
         detectorAvailable = detector.isAvailable
+        detectorLoadMessage = detector.loadFailureMessage
     }
 
     func start() {
@@ -105,10 +117,7 @@ final class MachineGeometryLockController: ObservableObject {
         visionQueue.async { [weak self] in
             guard let self else { return }
             self.running = false
-            self.trackingRequest = nil
-            self.lastOuterBox = nil
-            self.lastInnerBox = nil
-            self.lostFrameCount = 0
+            self.resetTracking()
             self.publishFraming(.identity)
             self.publishStatus(.paused)
         }
@@ -190,17 +199,17 @@ final class MachineGeometryLockController: ObservableObject {
             height: CVPixelBufferGetHeight(pixelBuffer)
         )
 
-        // Core ML is sampled below the display rate. Vision's tracker carries
-        // the target between detections, so model work cannot stall rendering.
-        let needsDetection = detector.isAvailable
-            ? trackingRequest == nil || frameCounter % 12 == 0 || lostFrameCount > 0
-            : trackingRequest == nil || frameCounter % 8 == 0 || lostFrameCount > 0
-
-        if needsDetection, let detection = detectGeometry(in: pixelBuffer) {
-            beginTracking(outer: detection.outer, inner: detection.inner)
+        // Core ML stays off the display-rate path. Search more often before a
+        // lock and during loss, then let Vision tracking bridge detections.
+        if shouldRunDetection(at: presentationTime),
+           let detection = detectGeometry(in: pixelBuffer) {
+            let stable = stabilizedDetection(detection)
+            beginTracking(outer: stable.outer, inner: stable.inner)
+            hasAcquiredLock = true
+            lastSuccessfulTrackingTime = presentationTime
             updateFraming(
-                outer: detection.outer,
-                inner: detection.inner,
+                outer: stable.outer,
+                inner: stable.inner,
                 gimbalTransform: gimbalTransform,
                 presentationTime: presentationTime
             )
@@ -216,10 +225,61 @@ final class MachineGeometryLockController: ObservableObject {
         guard frameCounter % 2 == 0 else { return }
 
         if advanceTracker(on: pixelBuffer, gimbalTransform: gimbalTransform, presentationTime: presentationTime) {
+            hasAcquiredLock = true
+            lastSuccessfulTrackingTime = presentationTime
             publishStatus(.tracking)
-        } else if trackingRequest == nil {
-            publishStatus(.searching)
         } else {
+            updateStatusAfterMiss(presentationTime: presentationTime)
+        }
+    }
+
+    private func shouldRunDetection(at presentationTime: TimeInterval) -> Bool {
+        guard detector.isAvailable else { return false }
+        let interval: TimeInterval
+        if trackingRequest == nil {
+            interval = 0.22
+        } else if lostFrameCount > 0 {
+            interval = 0.14
+        } else {
+            interval = 0.34
+        }
+
+        guard presentationTime.isFinite else {
+            return frameCounter % (trackingRequest == nil ? 8 : 12) == 0
+        }
+        if let previous = lastDetectionPresentationTime,
+           presentationTime >= previous,
+           presentationTime - previous < interval {
+            return false
+        }
+        lastDetectionPresentationTime = presentationTime
+        return true
+    }
+
+    private func stabilizedDetection(_ detection: GeometryDetection) -> GeometryDetection {
+        guard let previousOuter = lastOuterBox,
+              let previousInner = lastInnerBox else { return detection }
+        return GeometryDetection(
+            outer: stabilizedBox(detection.outer, against: previousOuter, alpha: 0.48),
+            inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.42)
+        )
+    }
+
+    private func updateStatusAfterMiss(presentationTime: TimeInterval) {
+        guard hasAcquiredLock else {
+            publishStatus(.searching)
+            return
+        }
+        let missDuration: TimeInterval
+        if presentationTime.isFinite,
+           let lastSuccessfulTime = lastSuccessfulTrackingTime,
+           presentationTime >= lastSuccessfulTime {
+            missDuration = presentationTime - lastSuccessfulTime
+        } else {
+            missDuration = Double(lostFrameCount) / 30.0
+        }
+        // A single bad tracker update should not make the lock indicator flash.
+        if missDuration >= 0.45 {
             publishStatus(.lost)
         }
     }
@@ -320,20 +380,32 @@ final class MachineGeometryLockController: ObservableObject {
 
         let mappedOuter = mapRectified(outerTopLeft)
         let mappedInner = mapRectified(innerTopLeft)
-        // Convert the measured camera ray into the gimbal's latched coordinate
-        // system with the exact pose belonging to this camera frame. The old
-        // yaw/pitch tangent offset was only a small-angle approximation and
-        // produced a persistent off-centre lock under roll and diagonal motion.
+        // Reconcile both detections: the inner screen gives the precise screen
+        // centre, while the surrounding button ring corrects detector bias.
+        // Bound the correction so an imperfect outer box cannot pull the
+        // calibrated screen centre away from the actual display.
+        let screenCenter = CGPoint(x: mappedInner.midX, y: mappedInner.midY)
+        let buttonRingCenter = CGPoint(x: mappedOuter.midX, y: mappedOuter.midY)
+        let correctionX = min(max(buttonRingCenter.x - screenCenter.x,
+                                  -mappedOuter.width * 0.12), mappedOuter.width * 0.12) * 0.30
+        let correctionY = min(max(buttonRingCenter.y - screenCenter.y,
+                                  -mappedOuter.height * 0.12), mappedOuter.height * 0.12) * 0.30
+        let calibratedScreenCenter = CGPoint(
+            x: screenCenter.x + correctionX,
+            y: screenCenter.y + correctionY
+        )
         let lockedCenter = lockedPoint(
-            fromCameraPoint: CGPoint(x: mappedInner.midX, y: mappedInner.midY),
+            fromCameraPoint: calibratedScreenCenter,
             transform: gimbalTransform
         )
 
+        // Zoom to the outer buttons so the whole machine panel stays visible;
+        // the screen centre above remains the optical lock point.
         let targetSize = max(
-            mappedInner.width,
-            mappedInner.height * previewSize.height / max(previewSize.width, 1)
+            mappedOuter.width,
+            mappedOuter.height * previewSize.height / max(previewSize.width, 1)
         )
-        guard targetSize.isFinite, targetSize > 0.025, targetSize < 1.6 else { return }
+        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return }
 
         let aspect = previewSize.width * max(mappedInner.width, 0.001)
             / max(previewSize.height * mappedInner.height, 0.001)
@@ -341,14 +413,16 @@ final class MachineGeometryLockController: ObservableObject {
         let desiredStretchY: CGFloat = 1
         if referenceTargetSize == nil {
             referenceTargetSize = targetSize
-            referenceZoom = smoothedZoom
+            // Fill most of the portrait frame with the complete button ring on
+            // acquisition; later zoom changes cancel phone-distance changes.
+            referenceZoom = min(max(0.84 / targetSize, 0.72), 3.2)
         }
         let targetAtLock = max(referenceTargetSize ?? targetSize, 0.04)
-        // A phone moving closer makes the inner screen larger in the image;
+        // A phone moving closer makes the outer button ring larger in the image;
         // reduce digital zoom by the same ratio. Moving backwards does the
         // inverse. Latching this ratio at acquisition preserves the user's
         // chosen composition instead of snapping to an arbitrary fill value.
-        let desiredZoom = min(max(referenceZoom * targetAtLock / targetSize, 0.72), 2.8)
+        let desiredZoom = min(max(referenceZoom * targetAtLock / targetSize, 0.72), 3.2)
 
         let deltaTime: CGFloat
         if let previousTime = lastFramingTimestamp,
@@ -385,31 +459,14 @@ final class MachineGeometryLockController: ObservableObject {
 
     private func handleTrackingLoss() {
         lostFrameCount += 1
-        publishStatus(lostFrameCount > 45 ? .searching : .lost)
         guard lostFrameCount > 45 else { return }
 
         trackingRequest = nil
         lastOuterBox = nil
         lastInnerBox = nil
-        smoothedCenter.x += (0.5 - smoothedCenter.x) * 0.06
-        smoothedCenter.y += (0.5 - smoothedCenter.y) * 0.06
-        smoothedZoom += (1 - smoothedZoom) * 0.06
-        smoothedStretchX += (1 - smoothedStretchX) * 0.06
-        smoothedStretchY += (1 - smoothedStretchY) * 0.06
-
-        if abs(smoothedCenter.x - 0.5) < 0.003,
-           abs(smoothedCenter.y - 0.5) < 0.003,
-           abs(smoothedZoom - 1) < 0.01 {
-            publishFraming(.identity)
-        } else {
-            publishFraming(MachineGeometryFraming(
-                center: smoothedCenter,
-                zoom: smoothedZoom,
-                stretchX: smoothedStretchX,
-                stretchY: smoothedStretchY,
-                isActive: true
-            ))
-        }
+        // Keep the last framing while reacquiring. Returning to identity here
+        // visibly lets the machine drift whenever a short detector run fails.
+        publishStatus(hasAcquiredLock ? .lost : .searching)
     }
 
     private func resetTracking() {
@@ -418,6 +475,9 @@ final class MachineGeometryLockController: ObservableObject {
         lastInnerBox = nil
         lostFrameCount = 0
         frameCounter = 0
+        hasAcquiredLock = false
+        lastDetectionPresentationTime = nil
+        lastSuccessfulTrackingTime = nil
         lastContourRefinementFrame = 0
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedZoom = 1
@@ -456,11 +516,17 @@ final class MachineGeometryLockController: ObservableObject {
     }
 
     private func mapRectified(_ rect: CGRect) -> CGRect {
+        let midX = rect.midX
+        let midY = rect.midY
         let points = [
             CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: midX, y: rect.minY),
             CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: midY),
             CGPoint(x: rect.maxX, y: rect.maxY),
-            CGPoint(x: rect.minX, y: rect.maxY)
+            CGPoint(x: midX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: midY)
         ].map {
             LensCoordinateMapper.rectifiedPoint(
                 fromFisheye: $0,
@@ -652,19 +718,27 @@ private struct FrameGeometryCandidate {
 /// same source works with every CodeMagic export of the package model.
 private final class FrameGeometryCoreMLDetector {
     private let request: VNCoreMLRequest?
+    let loadFailureMessage: String?
 
     var isAvailable: Bool { request != nil }
 
     init() {
-        guard let url = Bundle.main.url(forResource: "FrameGeometryDetector", withExtension: "mlmodelc"),
-              let model = try? MLModel(contentsOf: url),
-              let visionModel = try? VNCoreMLModel(for: model) else {
+        guard let url = Bundle.main.url(forResource: "FrameGeometryDetector", withExtension: "mlmodelc") else {
             request = nil
+            loadFailureMessage = "App 包内没有 FrameGeometryDetector.mlmodelc。请安装包含机台模型的新版 IPA。"
             return
         }
-        let request = VNCoreMLRequest(model: visionModel)
-        request.imageCropAndScaleOption = .scaleFit
-        self.request = request
+        do {
+            let model = try MLModel(contentsOf: url)
+            let visionModel = try VNCoreMLModel(for: model)
+            let request = VNCoreMLRequest(model: visionModel)
+            request.imageCropAndScaleOption = .scaleFit
+            self.request = request
+            loadFailureMessage = nil
+        } catch {
+            request = nil
+            loadFailureMessage = "机台模型加载失败：\(error.localizedDescription)"
+        }
     }
 
     func detect(
