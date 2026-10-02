@@ -31,6 +31,13 @@ private struct FisheyeUniforms {
     var machineViewRight: SIMD4<Float>
     var machineViewDown: SIMD4<Float>
     var machineViewForward: SIMD4<Float>
+    var rectifyShape: SIMD4<Float>
+    var ringCosine: SIMD4<Float>
+    var ringSine: SIMD4<Float>
+    var rectifyStrength: Float
+    var ringStrength: Float
+    var ringTarget: Float
+    var screenRadiusNorm: Float
 }
 
 final class FisheyeRenderer: NSObject, MTKViewDelegate {
@@ -279,8 +286,27 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             machineActive: framing.isActive ? 1 : 0,
             machineViewRight: framing.viewRotation.right,
             machineViewDown: framing.viewRotation.down,
-            machineViewForward: framing.viewRotation.forward
+            machineViewForward: framing.viewRotation.forward,
+            rectifyShape: framing.rectifyShape,
+            ringCosine: framing.ringCosine,
+            ringSine: framing.ringSine,
+            rectifyStrength: framing.isActive ? framing.rectifyStrength : 0,
+            ringStrength: framing.isActive ? framing.ringStrength : 0,
+            ringTarget: framing.ringTarget,
+            // The measurement is already in ray-plane units, and the shader
+            // builds its ray before the zoom is applied, so all that is left is
+            // to undo the zoom.
+            screenRadiusNorm: unzoomedScreenRadius(framing: framing, totalZoom: totalZoom)
         )
+    }
+
+    private func unzoomedScreenRadius(
+        framing: MachineGeometryFraming,
+        totalZoom: Float
+    ) -> Float {
+        guard framing.isActive, framing.screenRadiusPlane > 0 else { return 0 }
+        let zoom = max(Float(framing.zoom), 0.01) * max(totalZoom, 0.01)
+        return framing.screenRadiusPlane / zoom
     }
 }
 

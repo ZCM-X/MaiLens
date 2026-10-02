@@ -32,6 +32,13 @@ struct FisheyeUniforms {
     float4 machineViewRight;
     float4 machineViewDown;
     float4 machineViewForward;
+    float4 rectifyShape;
+    float4 ringCosine;
+    float4 ringSine;
+    float rectifyStrength;
+    float ringStrength;
+    float ringTarget;
+    float screenRadiusNorm;
 };
 
 vertex VertexOut fisheyeVertex(uint vertexID [[vertex_id]]) {
@@ -70,6 +77,29 @@ fragment float4 fisheyeFragment(
     // sensor direction, preserving perspective during yaw and pitch.
     float virtualFocal = u.destinationSize.x / (2.0 * tan(u.horizontalFOVRadians * 0.5));
     float2 rectilinear = viewOffsetPixels / max(virtualFocal, 1.0);
+
+    // The screen is a circle on the cabinet, so an ellipse here means the
+    // camera is tilted.  Pull it back to a circle first, then walk the eight
+    // button slots onto one radius: the screen can be round while the ring
+    // around it is still squashed, and the slots are what show it.
+    float2x2 rectify = float2x2(float2(u.rectifyShape.x, u.rectifyShape.y),
+                                float2(u.rectifyShape.z, u.rectifyShape.w));
+    rectilinear = mix(rectilinear, rectify * rectilinear, u.rectifyStrength);
+    if (u.ringStrength > 0.0 && u.screenRadiusNorm > 0.0) {
+        float distanceNorm = length(rectilinear);
+        // The slot angles are measured with y up; this plane's y runs down.
+        float direction = atan2(-rectilinear.y, rectilinear.x);
+        float rho = u.ringCosine.x
+            + u.ringCosine.y * cos(direction) + u.ringSine.x * sin(direction)
+            + u.ringCosine.z * cos(2.0 * direction) + u.ringSine.y * sin(2.0 * direction)
+            + u.ringCosine.w * cos(3.0 * direction) + u.ringSine.z * sin(3.0 * direction);
+        float ringNorm = max(u.ringTarget, 0.05) * u.screenRadiusNorm;
+        float ramp = smoothstep(u.screenRadiusNorm, ringNorm, distanceNorm);
+        float factor = 1.0 + u.ringStrength * ramp
+            * (rho / max(u.ringTarget, 0.05) - 1.0);
+        rectilinear *= clamp(factor, 0.70, 1.40);
+    }
+
     float3 rayOutput = normalize(float3(rectilinear.x, rectilinear.y, 1.0));
     float3x3 lockedFromMachine = float3x3(u.machineViewRight.xyz,
                                           u.machineViewDown.xyz,

@@ -8,6 +8,8 @@ struct ContentView: View {
     @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
     @AppStorage("maiLens.machineBorderGapMM") private var machineBorderGapMM = 75.0
+    @AppStorage("maiLens.rectifyStrength") private var rectifyStrength = 1.0
+    @AppStorage("maiLens.ringRoundStrength") private var ringRoundStrength = 1.0
     @State private var sharedProfile: LensProfileFile?
 
     var body: some View {
@@ -34,8 +36,16 @@ struct ContentView: View {
         .onChange(of: machineBorderGapMM) { _, newValue in
             machineLock.updateMachineBorderGapMM(newValue)
         }
+        .onChange(of: rectifyStrength) { _, newValue in
+            machineLock.updateRectifyStrength(newValue)
+        }
+        .onChange(of: ringRoundStrength) { _, newValue in
+            machineLock.updateRingRoundStrength(newValue)
+        }
         .onAppear {
             machineLock.updateMachineBorderGapMM(machineBorderGapMM)
+            machineLock.updateRectifyStrength(rectifyStrength)
+            machineLock.updateRingRoundStrength(ringRoundStrength)
         }
         .sheet(item: $sharedProfile) { profile in
             ShareProfileSheet(url: profile.url)
@@ -325,6 +335,20 @@ struct ContentView: View {
                 valueFormat: "%.0f mm"
             )
 
+            TuningSlider(
+                title: "拉正内屏成正圆",
+                value: $rectifyStrength,
+                range: 0...1,
+                valueFormat: "%.2f"
+            )
+
+            TuningSlider(
+                title: "八按键拉回同一圈",
+                value: $ringRoundStrength,
+                range: 0...1,
+                valueFormat: "%.2f"
+            )
+
             if machineLock.isEnabled && machineLock.framing.isActive {
                 let gaps = machineLock.framing
                 if let distance = gaps.estimatedMachineDistanceMM {
@@ -334,6 +358,11 @@ struct ContentView: View {
                 }
                 Text(String(format: "重投影后四边间距(px)  左 %.0f  右 %.0f  上 %.0f  下 %.0f",
                             gaps.leftGap, gaps.rightGap, gaps.topGap, gaps.bottomGap))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.45))
+                Text(String(format: "内屏椭圆 %.3f   八按键绕圈离散 %.1f%%",
+                            Double(machineLock.screenFlatness),
+                            Double(machineLock.ringSpread) * 100))
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
             }

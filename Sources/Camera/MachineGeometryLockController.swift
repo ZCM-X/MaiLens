@@ -38,6 +38,20 @@ struct MachineGeometryFraming: Equatable {
     var bottomGap: CGFloat = 0
     var estimatedMachineDistanceMM: CGFloat? = nil
 
+    /// The screen ellipse pulled back to a circle, as the 2x2 the shader
+    /// applies to the ray before anything else.
+    var rectifyShape: SIMD4<Float> = SIMD4(1, 0, 0, 1)
+    var rectifyStrength: Float = 0
+    var ringCosine: SIMD4<Float> = SIMD4(MachineRectifier.tileRatio, 0, 0, 0)
+    var ringSine: SIMD4<Float> = .zero
+    var ringStrength: Float = 0
+    var ringTarget: Float = MachineRectifier.tileRatio
+    /// Screen radius in ray-plane units — the same units as the shader's
+    /// `rectilinear` — before the shader's zoom. Keeping it free of the frame
+    /// size is what lets the live preview and the 1080x1920 recording apply the
+    /// ring at the same place even though their focals differ.
+    var screenRadiusPlane: Float = 0
+
     static let identity = MachineGeometryFraming(
         center: CGPoint(x: 0.5, y: 0.5),
         zoom: 1,
@@ -78,6 +92,10 @@ final class MachineGeometryLockController: ObservableObject {
     @Published private(set) var framing = MachineGeometryFraming.identity
     @Published private(set) var detectorAvailable = false
     @Published private(set) var detectorLoadMessage: String?
+    /// Screen ellipse minor/major as seen now: 1 is round, 0.9 is a 26° tilt.
+    @Published private(set) var screenFlatness: Float = 0
+    /// Spread of the eight measured slots as a fraction of their mean.
+    @Published private(set) var ringSpread: Float = 0
 
     var previewStatusTitle: String {
         guard detectorAvailable else { return "机台模型未加载" }
@@ -121,6 +139,14 @@ final class MachineGeometryLockController: ObservableObject {
     private var smoothedZoom: CGFloat = 1
     private var detectedScreenEllipse: ScreenEllipse?
     private var machineBorderGapMM: CGFloat = 75
+    private var rectifyStrength: Float = 1.0
+    private var ringRoundStrength: Float = 1.0
+    private var smoothedRingCosine = SIMD4<Float>(MachineRectifier.tileRatio, 0, 0, 0)
+    private var smoothedRingSine = SIMD4<Float>.zero
+    private var hasRingFit = false
+    private var lastRingSpread: Float = 0
+    private var publishedFlatness: Float = -1
+    private var publishedRingSpread: Float = -1
     private var referenceMachineDistanceMM: CGFloat?
     private var referenceZoom: CGFloat = 1
     private var lastFramingTimestamp: TimeInterval?
@@ -161,6 +187,20 @@ final class MachineGeometryLockController: ObservableObject {
             self.machineBorderGapMM = clamped
             self.referenceMachineDistanceMM = nil
         }
+    }
+
+    /// How much of the screen-ellipse-to-circle correction to apply. 1 is
+    /// "the screen is round"; 0 hands the preview back to the raw geometry.
+    func updateRectifyStrength(_ value: Double) {
+        let clamped = Float(min(max(value, 0), 1))
+        visionQueue.async { [weak self] in self?.rectifyStrength = clamped }
+    }
+
+    /// How much of the eight-slot pull-back to apply. 0 leaves the ring as
+    /// the lens saw it, 1 puts all eight slots on one circle.
+    func updateRingRoundStrength(_ value: Double) {
+        let clamped = Float(min(max(value, 0), 1))
+        visionQueue.async { [weak self] in self?.ringRoundStrength = clamped }
     }
 
     func updatePreviewSize(_ size: CGSize) {
@@ -251,6 +291,7 @@ final class MachineGeometryLockController: ObservableObject {
                 if updateFraming(
                     outer: stable.outer,
                     inner: stable.inner,
+                    pixelBuffer: pixelBuffer,
                     gimbalTransform: gimbalTransform,
                     presentationTime: presentationTime
                 ) {
@@ -410,6 +451,7 @@ final class MachineGeometryLockController: ObservableObject {
             guard updateFraming(
                 outer: trackedOuter,
                 inner: trackedInner,
+                pixelBuffer: pixelBuffer,
                 gimbalTransform: gimbalTransform,
                 presentationTime: presentationTime
             ) else {
@@ -446,6 +488,7 @@ final class MachineGeometryLockController: ObservableObject {
     private func updateFraming(
         outer: CGRect,
         inner: CGRect,
+        pixelBuffer: CVPixelBuffer,
         gimbalTransform: DigitalGimbalTransform,
         presentationTime: TimeInterval
     ) -> Bool {
@@ -551,6 +594,93 @@ final class MachineGeometryLockController: ObservableObject {
         smoothedZoom += (desiredZoom - smoothedZoom) * zoomAlpha
         let renderedGapScale = smoothedZoom * (gimbalTransform.gimbalActive ? 1.36 : 1)
 
+        // The screen ellipse and the 2x2 that turns it back into the circle
+        // it is on the real cabinet, both in the locked output plane — the
+        // plane the shader corrects in.  The detector reads the preview plane,
+        // so the view rotation that centres the screen has to be carried
+        // through first; skipping that leaves the correction tilted by however
+        // far off-centre the cabinet was when the lock caught it.
+        var shape = matrix_identity_float2x2
+        var screenRadius: CGFloat = 0
+        var screenRadiusPlane: Float = 0
+        var ringCosine = smoothedRingCosine
+        var ringSine = smoothedRingSine
+        var ringActive = hasRingFit
+        if let ellipse = detectedScreenEllipse {
+            let cosine = cos(ellipse.angle)
+            let sine = sin(ellipse.angle)
+            let majorSource = CGPoint(
+                x: ellipse.center.x + ellipse.majorRadius * cosine / sourceSize.width,
+                y: ellipse.center.y + ellipse.majorRadius * sine / sourceSize.height
+            )
+            let minorSource = CGPoint(
+                x: ellipse.center.x - ellipse.minorRadius * sine / sourceSize.width,
+                y: ellipse.center.y + ellipse.minorRadius * cosine / sourceSize.height
+            )
+            let plane = MachinePlaneMap(
+                outputToPreview: viewRotation.matrix,
+                previewSize: previewSize,
+                horizontalFOV: settings.horizontalFOV
+            )
+            let centerPreview = mapRectifiedPoint(ellipse.center)
+            let focal = plane.focal
+            if let lockedCenter = plane.lockedPlane(centerPreview),
+               let lockedMajor = plane.lockedPlane(mapRectifiedPoint(majorSource)),
+               let lockedMinor = plane.lockedPlane(mapRectifiedPoint(minorSource)) {
+                // Back to pixel-like units: the 2x2 is scale invariant, but the
+                // radius has to be comparable with the shader's focal.
+                let majorAxis = CGPoint(x: (lockedMajor.x - lockedCenter.x) * focal,
+                                        y: (lockedMajor.y - lockedCenter.y) * focal)
+                let minorAxis = CGPoint(x: (lockedMinor.x - lockedCenter.x) * focal,
+                                        y: (lockedMinor.y - lockedCenter.y) * focal)
+                shape = MachineRectifier.shape(majorAxis: majorAxis,
+                                               minorAxis: minorAxis,
+                                               strength: Double(rectifyStrength))
+                screenRadius = (hypot(majorAxis.x, majorAxis.y)
+                                + hypot(minorAxis.x, minorAxis.y)) * 0.5
+                screenRadiusPlane = Float(screenRadius / max(focal, 1))
+
+                // The eight decorative frames are one part repeated eight
+                // times, so head-on they sit at one radius in all eight
+                // directions. Read them off the camera buffer and fit that ring.
+                if screenRadius > 12, ringRoundStrength > 0 {
+                    let reading = ButtonRingSampler.measure(
+                        pixelBuffer: pixelBuffer,
+                        sourceSize: sourceSize,
+                        settings: settings,
+                        map: plane,
+                        centerPreview: centerPreview,
+                        screenRadius: screenRadius
+                    )
+                    if reading.isValid,
+                       let fit = MachineRectifier.fitBest(reading.ratios) {
+                        let alpha: Float = 0.25
+                        smoothedRingCosine += (fit.cosine - smoothedRingCosine) * alpha
+                        smoothedRingSine += (fit.sine - smoothedRingSine) * alpha
+                        hasRingFit = true
+                        lastRingSpread = reading.spread
+                        ringCosine = smoothedRingCosine
+                        ringSine = smoothedRingSine
+                        ringActive = true
+                    }
+                }
+            }
+        }
+
+        let flatness = detectedScreenEllipse.map {
+            Float($0.minorRadius / max($0.majorRadius, 0.001))
+        } ?? 0
+        if abs(flatness - publishedFlatness) > 0.002
+            || abs(lastRingSpread - publishedRingSpread) > 0.002 {
+            publishedFlatness = flatness
+            publishedRingSpread = lastRingSpread
+            let spread = lastRingSpread
+            DispatchQueue.main.async { [weak self] in
+                self?.screenFlatness = flatness
+                self?.ringSpread = spread
+            }
+        }
+
         let current = MachineGeometryFraming(
             center: smoothedCenter,
             zoom: smoothedZoom,
@@ -565,7 +695,18 @@ final class MachineGeometryLockController: ObservableObject {
                 * previewSize.height * renderedGapScale,
             bottomGap: max(correctedOuterBounds.maxY - correctedInnerBounds.maxY, 0)
                 * previewSize.height * renderedGapScale,
-            estimatedMachineDistanceMM: estimatedMachineDistanceMM
+            estimatedMachineDistanceMM: estimatedMachineDistanceMM,
+            // The shader rebuilds this as float2x2(float2(x, y), float2(z, w)),
+            // i.e. column major, so the two column vectors go in order.
+            rectifyShape: SIMD4<Float>(shape.columns.0.x, shape.columns.0.y,
+                                       shape.columns.1.x, shape.columns.1.y),
+            rectifyStrength: detectedScreenEllipse == nil || rectifyStrength <= 0
+                ? 0 : 1,
+            ringCosine: ringCosine,
+            ringSine: ringSine,
+            ringStrength: ringActive ? ringRoundStrength : 0,
+            ringTarget: MachineRectifier.tileRatio,
+            screenRadiusPlane: screenRadiusPlane
         )
         publishFraming(current)
         return true
@@ -598,6 +739,9 @@ final class MachineGeometryLockController: ObservableObject {
         lastContourRefinementFrame = 0
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedZoom = 1
+        hasRingFit = false
+        smoothedRingCosine = SIMD4<Float>(MachineRectifier.tileRatio, 0, 0, 0)
+        smoothedRingSine = .zero
         detectedScreenEllipse = nil
         referenceMachineDistanceMM = nil
         referenceZoom = 1
