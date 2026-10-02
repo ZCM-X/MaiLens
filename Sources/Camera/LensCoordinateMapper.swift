@@ -16,7 +16,7 @@ enum LensCoordinateMapper {
 
         let sourceWidth = Double(sourceSize.width)
         let sourceHeight = Double(sourceSize.height)
-        let focal = Double(max(sourceSize.width, sourceSize.height)) * 772.4089 / 4032.0
+        let focal = settings.sourceFocalLength(for: sourceSize)
         let virtualFocal = Double(previewSize.width) / (2.0 * tan(settings.horizontalFOV * .pi / 360.0))
         let rayX = (Double(point.x) - 0.5) * Double(previewSize.width) / virtualFocal
         let rayY = (Double(point.y) - 0.5) * Double(previewSize.height) / virtualFocal
@@ -44,7 +44,7 @@ enum LensCoordinateMapper {
 
         let sourceWidth = Double(sourceSize.width)
         let sourceHeight = Double(sourceSize.height)
-        let focal = Double(max(sourceSize.width, sourceSize.height)) * 772.4089 / 4032.0
+        let focal = settings.sourceFocalLength(for: sourceSize)
         let distortedX = (Double(point.x) - settings.centerX) * sourceWidth / focal
         let distortedY = (Double(point.y) - settings.centerY) * sourceHeight / focal
         let distortedRadius = hypot(distortedX, distortedY)

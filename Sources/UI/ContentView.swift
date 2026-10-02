@@ -436,10 +436,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 17) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("手动校正")
+                    Text("镜头几何校正")
                         .font(.system(size: 19, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("对照预览里的直线微调，设置会自动保存在本机")
+                    Text("调节鱼眼投影参数，对照预览微调；设置会自动保存在本机")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.48))
                 }
@@ -458,8 +458,15 @@ struct ContentView: View {
                 TuningSlider(title: "中心 Y", value: $settings.centerY, range: 0.44...0.56, valueFormat: "%.3f")
                 TuningSlider(title: "径向畸变 K1", value: $settings.k1, range: -0.20...0.40, valueFormat: "%+.3f")
                 TuningSlider(title: "径向畸变 K2", value: $settings.k2, range: -0.20...0.20, valueFormat: "%+.3f")
-                TuningSlider(title: "输出视场角", value: $settings.horizontalFOV, range: 70...155, valueFormat: "%.0f°")
+                TuningSlider(title: "输出视场角（横向）", value: $settings.horizontalFOV, range: 70...155, valueFormat: "%.0f°")
+                TuningSlider(title: "镜头半视场角", value: $settings.lensHalfFOV, range: 45...85, valueFormat: "%.0f°")
+                TuningSlider(title: "成像圈比例（相对短边）", value: $settings.imageCircleRatio, range: 0.70...1.60, valueFormat: "%.2f×")
             }
+
+            Text("镜头半视场角定义成像圈边缘的光线角度；成像圈直径 = 输入画面短边 × 比例。")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
                 Button {
@@ -494,7 +501,8 @@ struct ContentView: View {
                 Text("机台实拍配置")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
-                Text("已载入 MaiLens 镜头配置和机台实拍视场角。外夹鱼眼镜头的安装差异可用上方参数微调，修改会自动保存在本机。")
+                Text(String(format: "当前默认：输出视场 %.0f°、镜头半视场 %.0f°、成像圈 %.2f×。外夹镜头安装差异可用上方滑条微调。",
+                            settings.horizontalFOV, settings.lensHalfFOV, settings.imageCircleRatio))
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(.white.opacity(0.52))
                     .fixedSize(horizontal: false, vertical: true)

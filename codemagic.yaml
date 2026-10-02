@@ -23,7 +23,7 @@ workflows:
             torch==2.5.0 \
             torchvision==0.20.0
           python Training/export_coreml.py \
-            --weights Training/models/frame-geometry-yolo11n-v2.pt \
+            --weights Training/models/frame-geometry-yolo11n-v5.pt \
             --output Resources/FrameGeometryDetector.mlpackage
       - name: Generate Xcode project
         script: xcodegen generate --spec project.yml

@@ -3,8 +3,8 @@
 Ultralytics deliberately refuses Core ML export on Windows.  CodeMagic runs
 this script on its macOS builder before XcodeGen creates the project. The
 resulting package is named ``FrameGeometryDetector`` so the app can load it
-without generated Swift model classes. It contains ``outer_frame`` and
-``inner_screen`` classes.
+without generated Swift model classes. The deployed v5 checkpoint contains
+``outer_buttons`` and ``inner_screen`` classes.
 """
 
 from __future__ import annotations

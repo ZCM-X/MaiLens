@@ -6,19 +6,19 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 
 - Live 1080p preview from the iPhone rear ultra-wide camera. The app requests camera permission at launch.
 - Metal inverse mapping for the OpenCV fisheye angle model: `theta_d = theta * (1 + k1*theta^2 + k2*theta^4)`.
-- Manual controls for lens center X/Y, `k1`, `k2`, output horizontal field of view, and an on/off correction switch.
-- A bundled lens profile based on the user's machine-shot settings, with local persistence of subsequent tuning.
+- Manual controls for lens center X/Y, `k1`, `k2`, output field of view, lens half field of view, image-circle ratio, and an on/off correction switch.
+- A bundled clip-on fisheye profile with defaults of 103° output FOV, 69° lens half-FOV, and a 1.15× image circle relative to the input's short side. All values persist locally and are included in exported lens profiles.
 - JSON profile sharing, so the manually tuned settings can be saved and reused.
 - Lock mode digital gimbal: CoreMotion latches a levelled camera attitude, builds a raw-attitude quaternion correction at 120 Hz, interpolates it to each camera frame timestamp, and rotates the pinhole ray in Metal before the fisheye inverse map. A 1.36× reserve crop supplies room for yaw, pitch, and roll without exposing the lens edge. The preview has a visible “锁定当前画面” control and a button to re-lock the current view.
 - Camera lock controls: after the camera has warmed up, MaiLens automatically latches the current focus position and exposure duration/ISO. The UI can unlock either one or both, relock them, and adjust exposure compensation from −3 to +3 EV. Compensation continues to work while exposure is locked by changing custom ISO/shutter values.
-- Automatic machine geometry lock: a two-class `outer_frame`/`inner_screen` Core ML detector is paired with Vision contour refinement, containment and edge checks, short-loss tracking, EMA crop smoothing, and mild anisotropic correction. The Metal preview and processed recording consume the same framing state, so the machine keeps its position and apparent distance while the phone moves.
+- Automatic machine geometry lock: the v5 two-class `outer_buttons`/`inner_screen` Core ML detector is paired with Vision contour refinement, containment and edge checks, short-loss tracking, EMA crop smoothing, and mild anisotropic correction. The Metal preview and processed recording consume the same framing state, so the machine keeps its position and apparent distance while the phone moves.
 - Processed video recording: the same Metal transform used by the preview is rendered into a 1080×1920 H.264 MP4 in the app's Documents folder. Microphone audio is added after the user starts recording and grants permission. The share sheet can export the video or save it to Photos.
 
-The supplied training set combines the 50 still images from `D:\桌面文件\训练2` with the real fisheye still from `H:\IMG_8695.JPG`. The eight chart judgement markers are deliberately excluded from geometry training. CodeMagic exports the trained frame model to `Resources/FrameGeometryDetector.mlpackage` before building; live streaming remains to be added.
+The deployed v5 checkpoint is fine-tuned from the PC detector with corrected raw phone-fisheye frames, then CodeMagic exports it to `Resources/FrameGeometryDetector.mlpackage` before building. It recognizes the physical outer button ring and the circular gameplay screen; the eight chart judgement markers are deliberately excluded from geometry training.
 
 ## Calibration note
 
-The bundled profile uses a 106.458° output horizontal field of view from the user's machine-shot JSON, plus the available lens-center and radial-distortion values. Lens tuning is optional; different clip-on lens alignment can affect the corrected image.
+The bundled profile starts at 103° horizontal output FOV, 69° lens half-FOV, and a 1.15× image-circle diameter measured against the input frame's short side, plus the available lens-center and radial-distortion values. The half-FOV and image-circle ratio determine the source focal scale; the radial coefficients shape the edge curve. Sliders let you tune the geometry against the live preview.
 
 ## Build on CodeMagic
 

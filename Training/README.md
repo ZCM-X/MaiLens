@@ -40,3 +40,11 @@ The CodeMagic workflow exports the two-class frame-geometry detector to
 environment before XcodeGen runs. The app loads it through Vision at runtime;
 the virtual gimbal and geometry crop are independent switches, so the latter
 can be tested without changing the IMU lock.
+
+## Current phone-fisheye model
+
+The app's current Core ML model is `Training/models/frame-geometry-yolo11n-v5.pt`
+with the matching ONNX reference. It is the PC v5 checkpoint fine-tuned using
+corrected raw iPhone fisheye frames. The CodeMagic workflow exports this v5
+weight to `Resources/FrameGeometryDetector.mlpackage`; the app accepts its
+`outer_buttons` and `inner_screen` class names directly.

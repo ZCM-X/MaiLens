@@ -149,13 +149,13 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
         let currentGimbal = poses.center
         let outputSize = SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let sourceSize = SIMD2(Float(width), Float(height))
-        let seedFocal = Float(max(width, height)) * 772.41 / 4032.0
+        let sourceFocal = Float(currentSettings.sourceFocalLength(for: CGSize(width: width, height: height)))
         let uniforms = makeUniforms(
             settings: currentSettings,
             gimbal: currentGimbal,
             sourceSize: sourceSize,
             destinationSize: outputSize,
-            focalLength: seedFocal,
+            focalLength: sourceFocal,
             framing: framing,
             poses: poses
         )
@@ -198,7 +198,7 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
                         gimbal: currentGimbal,
                         sourceSize: sourceSize,
                         destinationSize: recordSize,
-                        focalLength: seedFocal,
+                        focalLength: sourceFocal,
                         framing: framing,
                         poses: poses
                     )
