@@ -36,8 +36,7 @@ enum LensCoordinateMapper {
         previewSize: CGSize,
         settings: LensCorrectionSettings
     ) -> CGPoint {
-        guard settings.correctionEnabled,
-              sourceSize.width > 0,
+        guard sourceSize.width > 0,
               sourceSize.height > 0,
               previewSize.width > 0,
               previewSize.height > 0 else { return point }
@@ -45,6 +44,8 @@ enum LensCoordinateMapper {
         let sourceWidth = Double(sourceSize.width)
         let sourceHeight = Double(sourceSize.height)
         let focal = settings.sourceFocalLength(for: sourceSize)
+        let coefficient1 = settings.correctionEnabled ? settings.k1 : 0
+        let coefficient2 = settings.correctionEnabled ? settings.k2 : 0
         let distortedX = (Double(point.x) - settings.centerX) * sourceWidth / focal
         let distortedY = (Double(point.y) - settings.centerY) * sourceHeight / focal
         let distortedRadius = hypot(distortedX, distortedY)
@@ -54,8 +55,8 @@ enum LensCoordinateMapper {
         for _ in 0..<7 {
             let theta2 = theta * theta
             let theta4 = theta2 * theta2
-            let residual = theta * (1.0 + settings.k1 * theta2 + settings.k2 * theta4) - distortedRadius
-            let derivative = 1.0 + 3.0 * settings.k1 * theta2 + 5.0 * settings.k2 * theta4
+            let residual = theta * (1.0 + coefficient1 * theta2 + coefficient2 * theta4) - distortedRadius
+            let derivative = 1.0 + 3.0 * coefficient1 * theta2 + 5.0 * coefficient2 * theta4
             guard abs(derivative) > 0.000001 else { break }
             theta = min(max(theta - residual / derivative, 0.0), 1.45)
         }

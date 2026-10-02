@@ -27,11 +27,11 @@ struct FisheyeUniforms {
     float k2;
     float correctionEnabled;
     float gimbalActive;
-    float2 machineCenter;
     float machineZoom;
-    float machineStretchX;
-    float machineStretchY;
     float machineActive;
+    float4 machineViewRight;
+    float4 machineViewDown;
+    float4 machineViewForward;
 };
 
 vertex VertexOut fisheyeVertex(uint vertexID [[vertex_id]]) {
@@ -52,33 +52,29 @@ fragment float4 fisheyeFragment(
     sampler linearSampler [[sampler(0)]],
     constant FisheyeUniforms& u [[buffer(0)]]) {
 
-    // Both virtual gimbal and machine lock operate in the rectified view. The
-    // machine centre is held in the locked coordinate system, while the
-    // gimbal rotation below maps each ray back into the live camera frame.
-    float2 viewOffset = in.uv - 0.5;
-    viewOffset /= float2(max(u.machineStretchX, 0.01), max(u.machineStretchY, 0.01));
-    viewOffset /= max(u.machineZoom, 0.01);
-    float2 lockedViewCenter = u.machineActive > 0.5 ? u.machineCenter : 0.5;
-    float2 rectifiedUV = lockedViewCenter + viewOffset / max(u.cropZoom, 0.01);
+    // Render one rectilinear virtual-camera view, then rotate each ray toward
+    // the tracked screen centre and through the gimbal pose before the inverse
+    // fisheye map. This reframes the lens view without stretching the image.
+    float2 viewOffsetPixels = (in.uv - 0.5) * u.destinationSize;
+    viewOffsetPixels /= max(u.machineZoom, 0.01);
+    viewOffsetPixels /= max(u.cropZoom, 0.01);
 
-    // Preserve the old raw-lens preview when no virtual gimbal is active. If
-    // the gimbal is active, continue through the ray path below so yaw/pitch/
-    // roll are still compensated even while correction is being previewed off.
-    if (u.correctionEnabled < 0.5 && u.gimbalActive < 0.5) {
-        if (any(rectifiedUV < 0.0) || any(rectifiedUV > 1.0)) {
-            return float4(0.025, 0.035, 0.04, 1.0);
-        }
-        return cameraFrame.sample(linearSampler, rectifiedUV);
+    // Preserve the true raw-lens view only when neither stabilization path is
+    // active. Machine lock still needs ray projection when lens tuning is off.
+    if (u.correctionEnabled < 0.5 && u.gimbalActive < 0.5 && u.machineActive < 0.5) {
+        return cameraFrame.sample(linearSampler, in.uv);
     }
 
-    // Build a ray in the locked pinhole camera, then rotate that ray into the
-    // current sensor camera. This is the crucial difference from a 2D crop:
-    // the same world direction remains in the centre through roll, pitch, and
-    // yaw, including diagonal movements.
+    // Build a ray in the output pinhole camera. Machine lock turns this camera
+    // toward the detected display centre; the gimbal then maps it to the live
+    // sensor direction, preserving perspective during yaw and pitch.
     float virtualFocal = u.destinationSize.x / (2.0 * tan(u.horizontalFOVRadians * 0.5));
-    float2 lockedPixels = (rectifiedUV - 0.5) * u.destinationSize;
-    float2 rectilinear = lockedPixels / max(virtualFocal, 1.0);
-    float3 rayLocked = normalize(float3(rectilinear.x, rectilinear.y, 1.0));
+    float2 rectilinear = viewOffsetPixels / max(virtualFocal, 1.0);
+    float3 rayOutput = normalize(float3(rectilinear.x, rectilinear.y, 1.0));
+    float3x3 lockedFromMachine = float3x3(u.machineViewRight.xyz,
+                                          u.machineViewDown.xyz,
+                                          u.machineViewForward.xyz);
+    float3 rayLocked = normalize(lockedFromMachine * rayOutput);
     float3x3 cameraFromLockedTop = float3x3(u.rotationTop0.xyz,
                                             u.rotationTop1.xyz,
                                             u.rotationTop2.xyz);

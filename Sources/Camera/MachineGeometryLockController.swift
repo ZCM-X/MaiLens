@@ -22,33 +22,56 @@ enum MachineGeometryLockStatus: Equatable {
     }
 }
 
-/// The framing state consumed by the Metal renderer. All coordinates are in
-/// top-left normalized rectified-image space, so the controller can keep the
-/// target in a stable world position while the phone moves underneath it.
+/// The virtual-camera state consumed by the Metal renderer. `center` is the
+/// detected screen centre in the gimbal-locked pinhole view; `viewRotation`
+/// turns the output camera toward that ray before sampling the fisheye image.
 struct MachineGeometryFraming: Equatable {
     var center: CGPoint
     var zoom: CGFloat
-    var stretchX: CGFloat
-    var stretchY: CGFloat
+    var viewRotation: MachineViewRotation
+    var screenEllipseDetected: Bool
     var isActive: Bool
 
     var leftGap: CGFloat = 0
     var rightGap: CGFloat = 0
     var topGap: CGFloat = 0
     var bottomGap: CGFloat = 0
+    var estimatedMachineDistanceMM: CGFloat? = nil
 
     static let identity = MachineGeometryFraming(
         center: CGPoint(x: 0.5, y: 0.5),
         zoom: 1,
-        stretchX: 1,
-        stretchY: 1,
+        viewRotation: .identity,
+        screenEllipseDetected: false,
         isActive: false
     )
 }
 
+/// Columns map output-camera rays into the gimbal-locked camera coordinate
+/// system. SIMD4 columns match Metal's 16-byte-aligned uniform layout.
+struct MachineViewRotation: Equatable {
+    var right: SIMD4<Float>
+    var down: SIMD4<Float>
+    var forward: SIMD4<Float>
+
+    static let identity = MachineViewRotation(
+        right: SIMD4<Float>(1, 0, 0, 0),
+        down: SIMD4<Float>(0, 1, 0, 0),
+        forward: SIMD4<Float>(0, 0, 1, 0)
+    )
+
+    var matrix: simd_float3x3 {
+        simd_float3x3(columns: (
+            SIMD3<Float>(right.x, right.y, right.z),
+            SIMD3<Float>(down.x, down.y, down.z),
+            SIMD3<Float>(forward.x, forward.y, forward.z)
+        ))
+    }
+}
+
 /// Reconciles the detected outer button ring and inner screen, locks the
-/// calibrated screen centre, and sizes the crop from the outer ring. The eight
-/// gameplay judgement markers are not part of this physical geometry.
+/// calibrated screen centre, and sets zoom from their measured border gap. The
+/// eight gameplay judgement markers are not part of this physical geometry.
 final class MachineGeometryLockController: ObservableObject {
     @Published private(set) var status: MachineGeometryLockStatus = .searching
     @Published private(set) var isEnabled = true
@@ -96,9 +119,9 @@ final class MachineGeometryLockController: ObservableObject {
     private var horizonRadians: CGFloat = 0
     private var smoothedCenter = CGPoint(x: 0.5, y: 0.5)
     private var smoothedZoom: CGFloat = 1
-    private var smoothedStretchX: CGFloat = 1
-    private var smoothedStretchY: CGFloat = 1
-    private var referenceTargetSize: CGFloat?
+    private var detectedScreenEllipse: ScreenEllipse?
+    private var machineBorderGapMM: CGFloat = 75
+    private var referenceMachineDistanceMM: CGFloat?
     private var referenceZoom: CGFloat = 1
     private var lastFramingTimestamp: TimeInterval?
     private var lastContourRefinementFrame = 0
@@ -129,6 +152,15 @@ final class MachineGeometryLockController: ObservableObject {
 
     func updateSettings(_ value: LensCorrectionSettings) {
         visionQueue.async { [weak self] in self?.settings = value }
+    }
+
+    func updateMachineBorderGapMM(_ value: Double) {
+        let clamped = CGFloat(min(max(value, 25), 200))
+        visionQueue.async { [weak self] in
+            guard let self, abs(self.machineBorderGapMM - clamped) > 0.001 else { return }
+            self.machineBorderGapMM = clamped
+            self.referenceMachineDistanceMM = nil
+        }
     }
 
     func updatePreviewSize(_ size: CGSize) {
@@ -208,6 +240,13 @@ final class MachineGeometryLockController: ObservableObject {
         if shouldRunDetection(at: presentationTime),
            let detection = detectGeometry(in: pixelBuffer) {
             let stable = stabilizedDetection(detection)
+            if let ellipse = stable.ellipse {
+                detectedScreenEllipse = stabilizedEllipse(
+                    ellipse,
+                    against: detectedScreenEllipse,
+                    alpha: 0.35
+                )
+            }
             if lostFrameCount > 0 || needsDetectorCorrection(stable) || !hasTrackingPair {
                 if updateFraming(
                     outer: stable.outer,
@@ -265,7 +304,8 @@ final class MachineGeometryLockController: ObservableObject {
               let previousInner = lastInnerBox else { return detection }
         return GeometryDetection(
             outer: stabilizedBox(detection.outer, against: previousOuter, alpha: 0.28),
-            inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.24)
+            inner: stabilizedBox(detection.inner, against: previousInner, alpha: 0.24),
+            ellipse: detection.ellipse
         )
     }
 
@@ -320,19 +360,22 @@ final class MachineGeometryLockController: ObservableObject {
         // refinement stage inside the outer ROI and is only accepted when it
         // agrees with the detector, preventing one high-contrast edge from
         // moving the crop by itself.
-        let refinedInner: CGRect
-        if frameCounter - lastContourRefinementFrame >= 30 {
-            refinedInner = refineInnerEllipse(
+        let ellipse: ScreenEllipse?
+        if frameCounter - lastContourRefinementFrame >= 8 {
+            ellipse = refineInnerEllipse(
                 in: pixelBuffer,
                 outer: raw.outer,
                 predictedInner: raw.inner
-            ) ?? raw.inner
+            )
             lastContourRefinementFrame = frameCounter
         } else {
-            refinedInner = raw.inner
+            ellipse = nil
         }
+        let refinedInner = ellipse.map {
+            blendRect(raw.inner, $0.bounds, currentWeight: 0.62)
+        } ?? raw.inner
         guard isPlausiblePair(outer: raw.outer, inner: refinedInner) else { return nil }
-        return GeometryDetection(outer: raw.outer, inner: refinedInner)
+        return GeometryDetection(outer: raw.outer, inner: refinedInner, ellipse: ellipse)
     }
 
     private func advanceTracker(
@@ -362,12 +405,15 @@ final class MachineGeometryLockController: ObservableObject {
             let previousInner = lastInnerBox ?? innerObservation.boundingBox
             let trackedOuter = stabilizedBox(outerObservation.boundingBox, against: previousOuter, alpha: 0.82)
             let trackedInner = stabilizedBox(innerObservation.boundingBox, against: previousInner, alpha: 0.82)
+            let previousEllipse = detectedScreenEllipse
+            advanceTrackedEllipse(from: previousInner, to: trackedInner)
             guard updateFraming(
                 outer: trackedOuter,
                 inner: trackedInner,
                 gimbalTransform: gimbalTransform,
                 presentationTime: presentationTime
             ) else {
+                detectedScreenEllipse = previousEllipse
                 handleTrackingLoss()
                 return false
             }
@@ -419,36 +465,12 @@ final class MachineGeometryLockController: ObservableObject {
               rectifiedIntersection.width * rectifiedIntersection.height / rectifiedInnerArea > 0.68 else {
             return false
         }
-        let screenCenter = CGPoint(x: mappedInner.midX, y: mappedInner.midY)
+        let cameraScreenCenter = detectedScreenEllipse.map(mapRectifiedPoint)
+            ?? CGPoint(x: mappedInner.midX, y: mappedInner.midY)
         let lockedCenter = lockedPoint(
-            fromCameraPoint: screenCenter,
+            fromCameraPoint: cameraScreenCenter,
             transform: gimbalTransform
         )
-
-        // Zoom to the outer buttons so the whole machine panel stays visible;
-        // the screen centre above remains the optical lock point.
-        let targetSize = max(
-            mappedOuter.width,
-            mappedOuter.height * previewSize.height / max(previewSize.width, 1)
-        )
-        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return false }
-
-        let aspect = previewSize.width * max(mappedInner.width, 0.001)
-            / max(previewSize.height * mappedInner.height, 0.001)
-        let desiredStretchX = min(max(aspect, 0.96), 1.04)
-        let desiredStretchY: CGFloat = 1
-        if referenceTargetSize == nil {
-            referenceTargetSize = targetSize
-            // Fill most of the portrait frame with the complete button ring on
-            // acquisition; later zoom changes cancel phone-distance changes.
-            referenceZoom = min(max(0.84 / targetSize, 0.72), 3.2)
-        }
-        let targetAtLock = max(referenceTargetSize ?? targetSize, 0.04)
-        // A phone moving closer makes the outer button ring larger in the image;
-        // reduce digital zoom by the same ratio. Moving backwards does the
-        // inverse. Latching this ratio at acquisition preserves the user's
-        // chosen composition instead of snapping to an arbitrary fill value.
-        let desiredZoom = min(max(referenceZoom * targetAtLock / targetSize, 0.72), 3.2)
 
         let deltaTime: CGFloat
         if let previousTime = lastFramingTimestamp,
@@ -467,20 +489,83 @@ final class MachineGeometryLockController: ObservableObject {
             x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * centerAlpha,
             y: smoothedCenter.y + (lockedCenter.y - smoothedCenter.y) * centerAlpha
         )
+        let viewRotation = machineViewRotation(
+            aimingAt: smoothedCenter,
+            previewSize: previewSize,
+            horizontalFOV: settings.horizontalFOV
+        )
+
+        // Rotate the virtual camera toward the screen-centre ray, then measure
+        // the outer ring in that new perspective view before choosing zoom.
+        let correctedOuterBounds = projectedBounds(
+            of: outerTopLeft,
+            gimbalTransform: gimbalTransform,
+            viewRotation: viewRotation
+        )
+        let correctedInnerBounds = projectedBounds(
+            of: innerTopLeft,
+            gimbalTransform: gimbalTransform,
+            viewRotation: viewRotation
+        )
+        let targetSize = max(
+            correctedOuterBounds.width,
+            correctedOuterBounds.height
+                * previewSize.height / max(previewSize.width, 1)
+        )
+        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return false }
+
+        // The measured 75 mm physical gap provides a local scale reference.
+        // Averaging all four projected borders reduces detector-box noise and
+        // estimates camera distance in the virtual pinhole view.
+        let gapLeftPixels = max(correctedInnerBounds.minX - correctedOuterBounds.minX, 0)
+            * previewSize.width
+        let gapRightPixels = max(correctedOuterBounds.maxX - correctedInnerBounds.maxX, 0)
+            * previewSize.width
+        let gapTopPixels = max(correctedInnerBounds.minY - correctedOuterBounds.minY, 0)
+            * previewSize.height
+        let gapBottomPixels = max(correctedOuterBounds.maxY - correctedInnerBounds.maxY, 0)
+            * previewSize.height
+        let meanGapPixels = (gapLeftPixels + gapRightPixels + gapTopPixels + gapBottomPixels) * 0.25
+        let horizontalFOV = CGFloat(min(max(settings.horizontalFOV, 1), 179)) * .pi / 180
+        let virtualFocalPixels = previewSize.width / (2 * tan(horizontalFOV * 0.5))
+        guard meanGapPixels.isFinite, meanGapPixels > 0.5,
+              virtualFocalPixels.isFinite, virtualFocalPixels > 0 else { return false }
+        let estimatedMachineDistanceMM = virtualFocalPixels * machineBorderGapMM / meanGapPixels
+        guard estimatedMachineDistanceMM.isFinite,
+              estimatedMachineDistanceMM >= 100,
+              estimatedMachineDistanceMM <= 20_000 else { return false }
+
+        if referenceMachineDistanceMM == nil {
+            referenceMachineDistanceMM = estimatedMachineDistanceMM
+            // Fill most of the portrait frame with the complete button ring on
+            // acquisition; the physical gap then drives distance compensation.
+            referenceZoom = min(max(0.84 / targetSize, 0.72), 3.2)
+        }
+        let distanceAtLock = max(referenceMachineDistanceMM ?? estimatedMachineDistanceMM, 1)
+        // A farther phone needs more digital zoom; a nearer phone needs less.
+        // The 75 mm gap converts measured image spacing to a metric distance.
+        let desiredZoom = min(max(
+            referenceZoom * estimatedMachineDistanceMM / distanceAtLock,
+            0.72
+        ), 3.2)
         smoothedZoom += (desiredZoom - smoothedZoom) * zoomAlpha
-        smoothedStretchX += (desiredStretchX - smoothedStretchX) * zoomAlpha
-        smoothedStretchY += (desiredStretchY - smoothedStretchY) * zoomAlpha
+        let renderedGapScale = smoothedZoom * (gimbalTransform.gimbalActive ? 1.36 : 1)
 
         let current = MachineGeometryFraming(
             center: smoothedCenter,
             zoom: smoothedZoom,
-            stretchX: smoothedStretchX,
-            stretchY: smoothedStretchY,
+            viewRotation: viewRotation,
+            screenEllipseDetected: detectedScreenEllipse != nil,
             isActive: true,
-            leftGap: max(innerTopLeft.minX - outerTopLeft.minX, 0),
-            rightGap: max(outerTopLeft.maxX - innerTopLeft.maxX, 0),
-            topGap: max(innerTopLeft.minY - outerTopLeft.minY, 0),
-            bottomGap: max(outerTopLeft.maxY - innerTopLeft.maxY, 0)
+            leftGap: max(correctedInnerBounds.minX - correctedOuterBounds.minX, 0)
+                * previewSize.width * renderedGapScale,
+            rightGap: max(correctedOuterBounds.maxX - correctedInnerBounds.maxX, 0)
+                * previewSize.width * renderedGapScale,
+            topGap: max(correctedInnerBounds.minY - correctedOuterBounds.minY, 0)
+                * previewSize.height * renderedGapScale,
+            bottomGap: max(correctedOuterBounds.maxY - correctedInnerBounds.maxY, 0)
+                * previewSize.height * renderedGapScale,
+            estimatedMachineDistanceMM: estimatedMachineDistanceMM
         )
         publishFraming(current)
         return true
@@ -494,6 +579,7 @@ final class MachineGeometryLockController: ObservableObject {
         innerTrackingRequest = nil
         lastOuterBox = nil
         lastInnerBox = nil
+        detectedScreenEllipse = nil
         // Keep the last framing while reacquiring. Returning to identity here
         // visibly lets the machine drift whenever a short detector run fails.
         publishStatus(hasAcquiredLock ? .lost : .searching)
@@ -512,9 +598,8 @@ final class MachineGeometryLockController: ObservableObject {
         lastContourRefinementFrame = 0
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedZoom = 1
-        smoothedStretchX = 1
-        smoothedStretchY = 1
-        referenceTargetSize = nil
+        detectedScreenEllipse = nil
+        referenceMachineDistanceMM = nil
         referenceZoom = 1
         lastFramingTimestamp = nil
     }
@@ -547,9 +632,13 @@ final class MachineGeometryLockController: ObservableObject {
     }
 
     private func mapRectified(_ rect: CGRect) -> CGRect {
+        bounds(of: samplePoints(on: rect).map(mapRectifiedPoint))
+    }
+
+    private func samplePoints(on rect: CGRect) -> [CGPoint] {
         let midX = rect.midX
         let midY = rect.midY
-        let points = [
+        return [
             CGPoint(x: rect.minX, y: rect.minY),
             CGPoint(x: midX, y: rect.minY),
             CGPoint(x: rect.maxX, y: rect.minY),
@@ -558,22 +647,86 @@ final class MachineGeometryLockController: ObservableObject {
             CGPoint(x: midX, y: rect.maxY),
             CGPoint(x: rect.minX, y: rect.maxY),
             CGPoint(x: rect.minX, y: midY)
-        ].map {
-            LensCoordinateMapper.rectifiedPoint(
-                fromFisheye: $0,
-                sourceSize: sourceSize,
-                previewSize: previewSize,
-                settings: settings
-            )
-        }
-        let xs = points.map(\.x)
-        let ys = points.map(\.y)
-        return CGRect(
-            x: xs.min() ?? rect.minX,
-            y: ys.min() ?? rect.minY,
-            width: (xs.max() ?? rect.maxX) - (xs.min() ?? rect.minX),
-            height: (ys.max() ?? rect.maxY) - (ys.min() ?? rect.minY)
+        ]
+    }
+
+    private func mapRectifiedPoint(_ point: CGPoint) -> CGPoint {
+        LensCoordinateMapper.rectifiedPoint(
+            fromFisheye: point,
+            sourceSize: sourceSize,
+            previewSize: previewSize,
+            settings: settings
         )
+    }
+
+    private func projectedBounds(
+        of rawRect: CGRect,
+        gimbalTransform: DigitalGimbalTransform,
+        viewRotation: MachineViewRotation
+    ) -> CGRect {
+        let points = samplePoints(on: rawRect).compactMap { rawPoint -> CGPoint? in
+            let rectified = mapRectifiedPoint(rawPoint)
+            let locked = lockedPoint(fromCameraPoint: rectified, transform: gimbalTransform)
+            return pointInMachineView(locked, rotation: viewRotation)
+        }
+        return points.count >= 4 ? bounds(of: points) : .zero
+    }
+
+    private func machineViewRotation(
+        aimingAt center: CGPoint,
+        previewSize: CGSize,
+        horizontalFOV: Double
+    ) -> MachineViewRotation {
+        guard previewSize.width > 0, previewSize.height > 0 else { return .identity }
+        let radians = min(max(horizontalFOV, 1), 179) * .pi / 180
+        let focal = previewSize.width / (2 * tan(CGFloat(radians) * 0.5))
+        let rayX = (center.x - 0.5) * previewSize.width / max(focal, 1)
+        let rayY = (center.y - 0.5) * previewSize.height / max(focal, 1)
+        let forward = simd_normalize(SIMD3<Float>(Float(rayX), Float(rayY), 1))
+
+        let opticalRight = SIMD3<Float>(1, 0, 0)
+        var right = opticalRight - simd_dot(opticalRight, forward) * forward
+        if simd_length_squared(right) < 0.0001 {
+            let opticalDown = SIMD3<Float>(0, 1, 0)
+            right = opticalDown - simd_dot(opticalDown, forward) * forward
+        }
+        right = simd_normalize(right)
+        let down = simd_normalize(simd_cross(forward, right))
+        return MachineViewRotation(
+            right: SIMD4<Float>(right, 0),
+            down: SIMD4<Float>(down, 0),
+            forward: SIMD4<Float>(forward, 0)
+        )
+    }
+
+    /// Expresses a tracked rectified ray in the rotated output camera. This is
+    /// used to size the outer-ring crop; the Metal renderer rotates the pixels.
+    private func pointInMachineView(
+        _ point: CGPoint,
+        rotation: MachineViewRotation
+    ) -> CGPoint? {
+        guard previewSize.width > 0, previewSize.height > 0 else { return nil }
+        let radians = min(max(settings.horizontalFOV, 1), 179) * .pi / 180
+        let focal = previewSize.width / (2 * tan(CGFloat(radians) * 0.5))
+        let ray = simd_normalize(SIMD3<Float>(
+            Float((point.x - 0.5) * previewSize.width / max(focal, 1)),
+            Float((point.y - 0.5) * previewSize.height / max(focal, 1)),
+            1
+        ))
+        let outputRay = simd_normalize(rotation.matrix.inverse * ray)
+        guard outputRay.z > 0.05 else { return nil }
+        let x = CGFloat(outputRay.x / outputRay.z) * focal / previewSize.width + 0.5
+        let y = CGFloat(outputRay.y / outputRay.z) * focal / previewSize.height + 0.5
+        guard x.isFinite, y.isFinite else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    private func bounds(of points: [CGPoint]) -> CGRect {
+        guard let minX = points.map(\.x).min(),
+              let maxX = points.map(\.x).max(),
+              let minY = points.map(\.y).min(),
+              let maxY = points.map(\.y).max() else { return .zero }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     private func visionToTopLeft(_ box: CGRect) -> CGRect {
@@ -606,6 +759,89 @@ final class MachineGeometryLockController: ObservableObject {
         )
     }
 
+    private func blendRect(_ previous: CGRect, _ current: CGRect, currentWeight: CGFloat) -> CGRect {
+        stabilizedBox(current, against: previous, alpha: currentWeight)
+    }
+
+    private func stabilizedEllipse(
+        _ current: ScreenEllipse,
+        against previous: ScreenEllipse?,
+        alpha: CGFloat
+    ) -> ScreenEllipse {
+        guard let previous else { return current }
+        let angleDelta = 0.5 * atan2(
+            sin(2 * (current.angle - previous.angle)),
+            cos(2 * (current.angle - previous.angle))
+        )
+        let center = CGPoint(
+            x: previous.center.x + (current.center.x - previous.center.x) * alpha,
+            y: previous.center.y + (current.center.y - previous.center.y) * alpha
+        )
+        let majorRadius = previous.majorRadius + (current.majorRadius - previous.majorRadius) * alpha
+        let minorRadius = previous.minorRadius + (current.minorRadius - previous.minorRadius) * alpha
+        let angle = previous.angle + angleDelta * alpha
+        return ScreenEllipse(
+            center: center,
+            majorRadius: majorRadius,
+            minorRadius: minorRadius,
+            angle: angle,
+            bounds: ellipseBounds(
+                center: center,
+                majorRadius: majorRadius,
+                minorRadius: minorRadius,
+                angle: angle
+            )
+        )
+    }
+
+    private func advanceTrackedEllipse(from previousBox: CGRect, to currentBox: CGRect) {
+        guard let ellipse = detectedScreenEllipse,
+              previousBox.width > 0.001,
+              previousBox.height > 0.001 else { return }
+        let previous = visionToTopLeft(previousBox)
+        let current = visionToTopLeft(currentBox)
+        let scaleX = current.width / previous.width
+        let scaleY = current.height / previous.height
+        guard scaleX.isFinite, scaleY.isFinite,
+              scaleX > 0.5, scaleX < 2,
+              scaleY > 0.5, scaleY < 2 else { return }
+        let scale = sqrt(scaleX * scaleY)
+        let center = CGPoint(
+            x: ellipse.center.x + current.midX - previous.midX,
+            y: ellipse.center.y + current.midY - previous.midY
+        )
+        let majorRadius = ellipse.majorRadius * scale
+        let minorRadius = ellipse.minorRadius * scale
+        detectedScreenEllipse = ScreenEllipse(
+            center: center,
+            majorRadius: majorRadius,
+            minorRadius: minorRadius,
+            angle: ellipse.angle,
+            bounds: ellipseBounds(
+                center: center,
+                majorRadius: majorRadius,
+                minorRadius: minorRadius,
+                angle: ellipse.angle
+            )
+        )
+    }
+
+    private func ellipseBounds(
+        center: CGPoint,
+        majorRadius: CGFloat,
+        minorRadius: CGFloat,
+        angle: CGFloat
+    ) -> CGRect {
+        let widthRadius = hypot(majorRadius * cos(angle), minorRadius * sin(angle)) / max(sourceSize.width, 1)
+        let heightRadius = hypot(majorRadius * sin(angle), minorRadius * cos(angle)) / max(sourceSize.height, 1)
+        return CGRect(
+            x: center.x - widthRadius,
+            y: center.y - heightRadius,
+            width: widthRadius * 2,
+            height: heightRadius * 2
+        )
+    }
+
     /// Fits an ellipse-like contour using the point covariance, then blends
     /// only a validated result with the detector box. This rejects isolated
     /// highlights while removing the visible rectangle pumping from YOLO.
@@ -613,7 +849,7 @@ final class MachineGeometryLockController: ObservableObject {
         in pixelBuffer: CVPixelBuffer,
         outer: CGRect,
         predictedInner: CGRect
-    ) -> CGRect? {
+    ) -> ScreenEllipse? {
         let request = VNDetectContoursRequest()
         request.maximumImageDimension = 512
         request.contrastAdjustment = 1.0
@@ -626,15 +862,14 @@ final class MachineGeometryLockController: ObservableObject {
         let outerTopLeft = visionToTopLeft(outer)
         var allContours = Array(observation.topLevelContours)
         var index = 0
-        var best: (box: CGRect, score: CGFloat)?
+        var best: (ellipse: ScreenEllipse, score: CGFloat)?
         while index < allContours.count {
             let contour = allContours[index]
             index += 1
             allContours.append(contentsOf: contour.childContours)
             guard contour.pointCount >= 24 else { continue }
-            let box = contourEllipseBounds(contour)
-                ?? contour.normalizedPath.boundingBoxOfPath.standardized
-            let topLeft = visionToTopLeft(box)
+            guard let ellipse = contourEllipseFit(contour) else { continue }
+            let topLeft = ellipse.bounds
             guard topLeft.width > 0.04, topLeft.height > 0.04,
                   outerTopLeft.contains(CGPoint(x: topLeft.midX, y: topLeft.midY)) else { continue }
             let overlap = intersectionOverUnion(topLeft, predictedInner)
@@ -647,19 +882,21 @@ final class MachineGeometryLockController: ObservableObject {
                 + CGFloat(exp(-Double(centerDistance) * 7.0)) * 0.18
                 + CGFloat(exp(-abs(log(max(aspect, 0.001))) * 2.0)) * 0.10
             if best == nil || score > best!.score {
-                best = (topLeft, score)
+                best = (ellipse, score)
             }
         }
         guard let best, best.score > 0.24 else { return nil }
-        return CGRect(
-            x: predictedInner.minX * 0.38 + best.box.minX * 0.62,
-            y: predictedInner.minY * 0.38 + best.box.minY * 0.62,
-            width: predictedInner.width * 0.38 + best.box.width * 0.62,
-            height: predictedInner.height * 0.38 + best.box.height * 0.62
+        let bounds = blendRect(predictedInner, best.ellipse.bounds, currentWeight: 0.62)
+        return ScreenEllipse(
+            center: best.ellipse.center,
+            majorRadius: best.ellipse.majorRadius,
+            minorRadius: best.ellipse.minorRadius,
+            angle: best.ellipse.angle,
+            bounds: bounds
         )
     }
 
-    private func contourEllipseBounds(_ contour: VNContour) -> CGRect? {
+    private func contourEllipseFit(_ contour: VNContour) -> ScreenEllipse? {
         var points: [CGPoint] = []
         contour.normalizedPath.applyWithBlock { elementPointer in
             let element = elementPointer.pointee
@@ -677,14 +914,17 @@ final class MachineGeometryLockController: ObservableObject {
             }
         }
         guard points.count >= 12 else { return nil }
+        let pixelPoints = points.map {
+            CGPoint(x: $0.x * sourceSize.width, y: (1 - $0.y) * sourceSize.height)
+        }
         let mean = CGPoint(
-            x: points.reduce(0) { $0 + $1.x } / CGFloat(points.count),
-            y: points.reduce(0) { $0 + $1.y } / CGFloat(points.count)
+            x: pixelPoints.reduce(0) { $0 + $1.x } / CGFloat(pixelPoints.count),
+            y: pixelPoints.reduce(0) { $0 + $1.y } / CGFloat(pixelPoints.count)
         )
         var xx: CGFloat = 0
         var yy: CGFloat = 0
         var xy: CGFloat = 0
-        for point in points {
+        for point in pixelPoints {
             let dx = point.x - mean.x
             let dy = point.y - mean.y
             xx += dx * dx
@@ -701,19 +941,36 @@ final class MachineGeometryLockController: ObservableObject {
         let majorVariance = max((trace + root) * 0.5, 0.000001)
         let minorVariance = max((trace - root) * 0.5, 0.000001)
         // Uniform samples around an ellipse have variance a²/2 and b²/2.
-        let majorAxis = sqrt(2 * majorVariance)
-        let minorAxis = sqrt(2 * minorVariance)
-        guard majorAxis.isFinite, minorAxis.isFinite,
-              majorAxis > 0.015, minorAxis > 0.015 else { return nil }
-        let pathBounds = contour.normalizedPath.boundingBoxOfPath.standardized
-        let width = min(max(majorAxis * 2, pathBounds.width * 0.60), pathBounds.width * 1.18)
-        let height = min(max(minorAxis * 2, pathBounds.height * 0.60), pathBounds.height * 1.18)
-        return CGRect(
-            x: mean.x - width * 0.5,
-            y: mean.y - height * 0.5,
+        let majorRadius = sqrt(2 * majorVariance)
+        let minorRadius = sqrt(2 * minorVariance)
+        let aspect = majorRadius / max(minorRadius, 0.001)
+        guard majorRadius.isFinite, minorRadius.isFinite,
+              majorRadius > 8, minorRadius > 8,
+              aspect >= 1, aspect < 3.0 else { return nil }
+        let angle = 0.5 * atan2(2 * xy, xx - yy)
+        let center = CGPoint(x: mean.x / sourceSize.width, y: mean.y / sourceSize.height)
+        let fittedBounds = ellipseBounds(
+            center: center,
+            majorRadius: majorRadius,
+            minorRadius: minorRadius,
+            angle: angle
+        )
+        let pathBounds = visionToTopLeft(contour.normalizedPath.boundingBoxOfPath.standardized)
+        let width = min(max(fittedBounds.width, pathBounds.width * 0.60), pathBounds.width * 1.18)
+        let height = min(max(fittedBounds.height, pathBounds.height * 0.60), pathBounds.height * 1.18)
+        let bounds = CGRect(
+            x: center.x - width * 0.5,
+            y: center.y - height * 0.5,
             width: width,
             height: height
-        ).standardized
+        )
+        return ScreenEllipse(
+            center: center,
+            majorRadius: majorRadius,
+            minorRadius: minorRadius,
+            angle: angle,
+            bounds: bounds
+        )
     }
 
     private func intersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
@@ -727,6 +984,15 @@ final class MachineGeometryLockController: ObservableObject {
 private struct GeometryDetection {
     let outer: CGRect
     let inner: CGRect
+    let ellipse: ScreenEllipse?
+}
+
+private struct ScreenEllipse {
+    let center: CGPoint
+    let majorRadius: CGFloat
+    let minorRadius: CGFloat
+    let angle: CGFloat
+    let bounds: CGRect
 }
 
 private struct FrameGeometryCandidate {
@@ -819,7 +1085,7 @@ private final class FrameGeometryCoreMLDetector {
 
         guard let outer, let inner else { return nil }
         guard plausiblePair(outer.box, inner.box) else { return nil }
-        return GeometryDetection(outer: outer.box, inner: inner.box)
+        return GeometryDetection(outer: outer.box, inner: inner.box, ellipse: nil)
     }
 
     private func best(candidates: [FrameGeometryCandidate], prior: CGRect?) -> FrameGeometryCandidate? {

@@ -26,11 +26,11 @@ private struct FisheyeUniforms {
     var k2: Float
     var correctionEnabled: Float
     var gimbalActive: Float
-    var machineCenter: SIMD2<Float>
     var machineZoom: Float
-    var machineStretchX: Float
-    var machineStretchY: Float
     var machineActive: Float
+    var machineViewRight: SIMD4<Float>
+    var machineViewDown: SIMD4<Float>
+    var machineViewForward: SIMD4<Float>
 }
 
 final class FisheyeRenderer: NSObject, MTKViewDelegate {
@@ -275,11 +275,11 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
             k2: settings.correctionEnabled ? Float(settings.k2) : 0,
             correctionEnabled: settings.correctionEnabled ? 1 : 0,
             gimbalActive: gimbal.isActive ? 1 : 0,
-            machineCenter: SIMD2<Float>(Float(framing.center.x), Float(framing.center.y)),
             machineZoom: framing.isActive ? Float(framing.zoom) : 1,
-            machineStretchX: framing.isActive ? Float(framing.stretchX) : 1,
-            machineStretchY: framing.isActive ? Float(framing.stretchY) : 1,
-            machineActive: framing.isActive ? 1 : 0
+            machineActive: framing.isActive ? 1 : 0,
+            machineViewRight: framing.viewRotation.right,
+            machineViewDown: framing.viewRotation.down,
+            machineViewForward: framing.viewRotation.forward
         )
     }
 }

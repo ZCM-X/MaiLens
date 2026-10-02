@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var machineLock = MachineGeometryLockController()
     @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
+    @AppStorage("maiLens.machineBorderGapMM") private var machineBorderGapMM = 75.0
     @State private var sharedProfile: LensProfileFile?
 
     var body: some View {
@@ -30,6 +31,12 @@ struct ContentView: View {
             }
         }
         .onChange(of: settings) { _, newValue in newValue.save() }
+        .onChange(of: machineBorderGapMM) { _, newValue in
+            machineLock.updateMachineBorderGapMM(newValue)
+        }
+        .onAppear {
+            machineLock.updateMachineBorderGapMM(machineBorderGapMM)
+        }
         .sheet(item: $sharedProfile) { profile in
             ShareProfileSheet(url: profile.url)
                 .presentationDetents([.medium])
@@ -261,10 +268,18 @@ struct ContentView: View {
                     .background(.white.opacity(0.08), in: Capsule())
             }
 
-            Text("同时检测外键区和内屏并交叉校验：内屏正中心作为锁定锚点，外键框决定裁切和缩放；短时漏检会保留构图并继续重试。")
+            Text("以内屏圆心转动虚拟相机视线并进行鱼眼射线重投影；75 mm 外框—内屏间距用于估算手机距离并补偿前后移动。横向视场保持 103°，画面不做横纵拉伸。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text(!machineLock.framing.isActive
+                 ? "等待检测外框与内屏"
+                 : machineLock.framing.screenEllipseDetected
+                    ? "内屏圆心已识别 · 虚拟视角已对准"
+                    : "使用内屏框中心 · 虚拟视角已对准")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(machineLock.framing.screenEllipseDetected ? Color.mint : Color.orange)
 
             if let detectorLoadMessage = machineLock.detectorLoadMessage {
                 Text(detectorLoadMessage)
@@ -293,9 +308,31 @@ struct ContentView: View {
                 }
             }
 
+            HStack {
+                Text(String(format: "虚拟视场 %.0f°", settings.horizontalFOV))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+                Spacer()
+                Text(String(format: "实体间距 %.0f mm", machineBorderGapMM))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.mint)
+            }
+
+            TuningSlider(
+                title: "外框到内屏实测间距",
+                value: $machineBorderGapMM,
+                range: 25...200,
+                valueFormat: "%.0f mm"
+            )
+
             if machineLock.isEnabled && machineLock.framing.isActive {
                 let gaps = machineLock.framing
-                Text(String(format: "外框间距  左 %.2f  右 %.2f  上 %.2f  下 %.2f",
+                if let distance = gaps.estimatedMachineDistanceMM {
+                    Text(String(format: "估计手机到机台距离 %.0f mm", distance))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.mint.opacity(0.85))
+                }
+                Text(String(format: "重投影后四边间距(px)  左 %.0f  右 %.0f  上 %.0f  下 %.0f",
                             gaps.leftGap, gaps.rightGap, gaps.topGap, gaps.bottomGap))
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
@@ -474,7 +511,7 @@ struct ContentView: View {
                 TuningSlider(title: "成像圈比例（相对短边）", value: $settings.imageCircleRatio, range: 0.70...1.60, valueFormat: "%.2f×")
             }
 
-            Text("镜头半视场角定义成像圈边缘的光线角度；成像圈直径 = 输入画面短边 × 比例。")
+            Text("103° 是鱼眼矫正后的横向输出视场。75 mm 是图中机台外框边缘到内屏边缘的实体间距，用于估算机台距离；两者是独立参数。")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(0.45))
                 .fixedSize(horizontal: false, vertical: true)

@@ -15,6 +15,7 @@ struct LensCorrectionSettings: Codable, Equatable {
     static let storageKey = "maiLens.lensCorrectionSettings.v1"
     private static let defaultLensHalfFOV = 69.0
     private static let defaultImageCircleRatio = 1.15
+    private static let mistaken75DegreeMigrationKey = "maiLens.migrated75DegreeAsMachineGap.v1"
 
     /// The bundled profile contains the clip-on lens geometry and the
     /// preliminary checkerboard fit for lens centre and radial distortion.
@@ -39,20 +40,33 @@ struct LensCorrectionSettings: Codable, Equatable {
     static func load() -> LensCorrectionSettings {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               var value = try? JSONDecoder().decode(LensCorrectionSettings.self, from: data) else {
+            UserDefaults.standard.set(true, forKey: mistaken75DegreeMigrationKey)
             return .preliminary
         }
 
         // Older saved profiles have no explicit fisheye projection geometry.
-        // Keep their checkerboard centre/K values, while moving the output FOV
-        // to the new 103° lens profile and persist the migration once.
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           (object["lensHalfFOV"] == nil || object["imageCircleRatio"] == nil) {
+        // Keep their checkerboard centre/K values and add the lens projection
+        // defaults from the bundled profile. Also repair a temporary 75°
+        // default used while the machine's 75 mm border gap was mistaken for FOV.
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let defaults = Self.preliminary
-            value.horizontalFOV = defaults.horizontalFOV
-            value.lensHalfFOV = defaults.lensHalfFOV
-            value.imageCircleRatio = defaults.imageCircleRatio
-            value.save()
+            let missingProjectionGeometry = object["lensHalfFOV"] == nil || object["imageCircleRatio"] == nil
+            let hasRunFOVMigration = UserDefaults.standard.bool(forKey: mistaken75DegreeMigrationKey)
+            let mistakenGapAsFOV = !hasRunFOVMigration && abs(value.horizontalFOV - 75) < 0.0001
+            if missingProjectionGeometry || mistakenGapAsFOV {
+                if mistakenGapAsFOV {
+                    value.horizontalFOV = defaults.horizontalFOV
+                }
+                if object["lensHalfFOV"] == nil {
+                    value.lensHalfFOV = defaults.lensHalfFOV
+                }
+                if object["imageCircleRatio"] == nil {
+                    value.imageCircleRatio = defaults.imageCircleRatio
+                }
+                value.save()
+            }
         }
+        UserDefaults.standard.set(true, forKey: mistaken75DegreeMigrationKey)
         return value
     }
 
