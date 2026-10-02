@@ -302,10 +302,10 @@ final class FisheyeRenderer: NSObject, MTKViewDelegate {
 
     private func unzoomedScreenRadius(
         framing: MachineGeometryFraming,
-        totalZoom: Float
+        totalZoom: Double
     ) -> Float {
         guard framing.isActive, framing.screenRadiusPlane > 0 else { return 0 }
-        let zoom = max(Float(framing.zoom), 0.01) * max(totalZoom, 0.01)
+        let zoom = max(Float(framing.zoom), 0.01) * max(Float(totalZoom), 0.01)
         return framing.screenRadiusPlane / zoom
     }
 }
