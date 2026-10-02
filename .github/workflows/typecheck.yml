@@ -1,0 +1,62 @@
+name: MaiLens typecheck
+
+# Type-checks the app sources with the iOS SDK and nothing else. The
+# CodeMagic workflow builds the real unsigned IPA; this one exists so a
+# compile error shows up as a plain GitHub check on the commit, in about the
+# time a CodeMagic round trip takes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Sources/**"
+      - "project.yml"
+      - ".github/workflows/typecheck.yml"
+  pull_request:
+    paths:
+      - "Sources/**"
+  workflow_dispatch:
+
+jobs:
+  typecheck:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Type-check the iOS sources
+        run: |
+          set -o pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          FILES="$(find Sources -name '*.swift' | sort)"
+          echo "checking $(echo "$FILES" | wc -l) swift files"
+          xcrun --sdk iphoneos swiftc -typecheck -parse-as-library \
+            -target arm64-apple-ios17.0 -sdk "$SDK" -swift-version 5 \
+            $FILES 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
+
+      - name: Compile the Metal shader
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcrun -sdk iphoneos metal -c Sources/Metal/Fisheye.metal \
+            -o "$RUNNER_TEMP/Fisheye.air" 2>&1 | tee "$RUNNER_TEMP/metal.log"
+
+      - name: Summarise what failed
+        if: always()
+        run: |
+          {
+            echo "## typecheck"
+            echo '```'
+            if [ -f "$RUNNER_TEMP/typecheck.log" ]; then
+              grep -E "error:|warning:" "$RUNNER_TEMP/typecheck.log" | head -n 60 || true
+            fi
+            if [ -s "$RUNNER_TEMP/metal.log" ]; then
+              echo "--- metal ---"
+              tail -n 40 "$RUNNER_TEMP/metal.log"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
