@@ -16,8 +16,8 @@ settings:
     INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
     INFOPLIST_KEY_UIUserInterfaceStyle: Dark
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-    MARKETING_VERSION: "1.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.2.0"
+    CURRENT_PROJECT_VERSION: "2"
 targets:
   MaiLens:
     type: application
