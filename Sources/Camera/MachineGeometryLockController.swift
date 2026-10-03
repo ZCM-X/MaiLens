@@ -149,27 +149,20 @@ final class MachineGeometryLockController: ObservableObject {
     private var publishedRingSpread: Float = -1
     private var referenceMachineDistanceMM: CGFloat?
     private var referenceZoom: CGFloat = 1
-    /// Where the cabinet sits in the gimbal-locked plane, in normalised
-    /// preview coordinates.  This, and not the newest detection, is what the
-    /// output camera aims at.
-    private var anchorCenter = CGPoint(x: 0.5, y: 0.5)
-    private var hasAnchor = false
-    private var offAnchorFrames = 0
-    /// Screen radius in ray-plane units at the moment the lock was taken, and
-    /// the zoom that goes with it.  Their ratio drives distance compensation.
+    /// How hard the crop is allowed to follow the machine.  The gyro already
+    /// takes the phone's rotation out, so all this smooths is tracker noise —
+    /// keep it short enough that the cabinet reads as pinned to the middle of
+    /// the frame rather than chasing it.
+    private static let centerTimeConstant: Double = 0.10
+    /// Screen radius in ray-plane units when the lock was taken, and the zoom
+    /// that went with it.  Their ratio is what compensates forward/backward
+    /// movement; the dead band and rate cap stop detector noise on the other
+    /// axes from leaking into the picture as size wobble.
     private var anchorScreenRadiusPlane: Float = 0
     private var hasAnchorRadius = false
     private var anchorZoom: CGFloat = 1
-
-    /// Time constants for the two slow corrections.  The lock itself reacts
-    /// instantly (it is carried by the gyro); only the residual drift left
-    /// over by phone translation is allowed to move anything.
-    private static let anchorTimeConstant: Double = 2.2
-    private static let anchorDeadband: CGFloat = 0.006
-    private static let anchorEscape: CGFloat = 0.34
-    private static let anchorEscapeFrames = 30
-    private static let zoomDeadband: CGFloat = 0.02
-    private static let zoomRate: CGFloat = 0.12
+    private static let zoomDeadband: CGFloat = 0.03
+    private static let zoomRatePerSecond: CGFloat = 0.35
     private static let zoomRange: ClosedRange<CGFloat> = 0.90...2.20
     private var lastFramingTimestamp: TimeInterval?
     private var lastContourRefinementFrame = 0
@@ -548,48 +541,20 @@ final class MachineGeometryLockController: ObservableObject {
         }
         lastFramingTimestamp = presentationTime.isFinite ? presentationTime : nil
 
-        // The anchor *is* the framing. The gyro already takes the phone's
-        // rotation out, so a cabinet that is not being carried sideways keeps
-        // one ray in this plane no matter how the phone is waved. Re-aiming at
-        // every detector reading re-injected the detector's frame-to-frame
-        // wander into the crop, which is what made the 10-03 preview slide while
-        // the zoom swung between 0.72x and 3.20x. The newest measurement may
-        // only nudge the anchor with a two-second time constant, so translation
-        // is still followed and detector noise is not.
-        let anchorOffset = hasAnchor
-            ? hypot(lockedCenter.x - anchorCenter.x, lockedCenter.y - anchorCenter.y)
-            : 0
-        if !hasAnchor {
-            anchorCenter = lockedCenter
-            hasAnchor = true
-            offAnchorFrames = 0
-        } else if anchorOffset > Self.anchorEscape {
-            // The tracker has been reporting the cabinet nearly half a frame
-            // away from the anchor for about half a second: it has latched onto
-            // the wrong copy of the machine. Drop it and let the detector
-            // re-acquire around the real one.
-            offAnchorFrames += 1
-            if offAnchorFrames > Self.anchorEscapeFrames {
-                offAnchorFrames = 0
-                outerTrackingRequest = nil
-                innerTrackingRequest = nil
-                lastOuterBox = nil
-                lastInnerBox = nil
-                detectedScreenEllipse = nil
-                return false
-            }
-        } else {
-            offAnchorFrames = 0
-            if anchorOffset > Self.anchorDeadband {
-                let anchorAlpha = CGFloat(1 - exp(-Double(deltaTime) / Self.anchorTimeConstant))
-                anchorCenter.x += (lockedCenter.x - anchorCenter.x) * anchorAlpha
-                anchorCenter.y += (lockedCenter.y - anchorCenter.y) * anchorAlpha
-            }
-        }
-        smoothedCenter = anchorCenter
+        // Where the cabinet is right now, in the frame the gyro has already
+        // de-rotated.  The output camera below is aimed straight at this, which
+        // is what pins the cabinet to the middle of the picture no matter where
+        // it started or how the phone is waved.  Only tracker noise is filtered
+        // here; holding a frozen anchor instead would freeze the cabinet
+        // wherever the lock happened to catch it, off to one side.
+        let centerAlpha = CGFloat(1 - exp(-Double(deltaTime) / Self.centerTimeConstant))
+        smoothedCenter = CGPoint(
+            x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * centerAlpha,
+            y: smoothedCenter.y + (lockedCenter.y - smoothedCenter.y) * centerAlpha
+        )
 
         let viewRotation = machineViewRotation(
-            aimingAt: anchorCenter,
+            aimingAt: smoothedCenter,
             previewSize: previewSize,
             horizontalFOV: settings.horizontalFOV
         )
@@ -732,7 +697,11 @@ final class MachineGeometryLockController: ObservableObject {
             let target = anchorZoom * ratio
             let delta = target - smoothedZoom
             if abs(delta) > Self.zoomDeadband, delta.isFinite {
-                let maxStep = max(Self.zoomRate * CGFloat(deltaTime) * 30.0, Self.zoomRate)
+                // Zoom is not a free parameter: it is the phone-to-cabinet
+                // distance, and distance cannot change at 6x a second. Cap
+                // it at well under one zoom unit per second so a spurious
+                // radius reading reads as a slow push instead of a jump.
+                let maxStep = max(CGFloat(deltaTime) * Self.zoomRatePerSecond, 0.0002)
                 smoothedZoom += max(min(delta, maxStep), -maxStep)
             }
         }
@@ -812,10 +781,7 @@ final class MachineGeometryLockController: ObservableObject {
         lastDetectionPresentationTime = nil
         lastSuccessfulTrackingTime = nil
         lastContourRefinementFrame = 0
-        anchorCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
-        hasAnchor = false
-        offAnchorFrames = 0
         anchorScreenRadiusPlane = 0
         hasAnchorRadius = false
         anchorZoom = 1

@@ -8,8 +8,12 @@ struct ContentView: View {
     @StateObject private var recorder = ProcessedVideoRecorder()
     @State private var settings = LensCorrectionSettings.load()
     @AppStorage("maiLens.machineBorderGapMM") private var machineBorderGapMM = 75.0
-    @AppStorage("maiLens.rectifyStrength") private var rectifyStrength = 1.0
-    @AppStorage("maiLens.ringRoundStrength") private var ringRoundStrength = 1.0
+    // Both geometry warps start at zero: applied every frame from a noisy
+    // measurement they visibly squash the cabinet, and the lock is meant to
+    // pin it, not reshape it. The new key names also drop the 1.0 that
+    // earlier builds left in AppStorage on an already-installed phone.
+    @AppStorage("maiLens.rectifyStrength.v2") private var rectifyStrength = 0.0
+    @AppStorage("maiLens.ringRoundStrength.v2") private var ringRoundStrength = 0.0
     @State private var sharedProfile: LensProfileFile?
 
     var body: some View {
