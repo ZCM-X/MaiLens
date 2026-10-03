@@ -149,6 +149,28 @@ final class MachineGeometryLockController: ObservableObject {
     private var publishedRingSpread: Float = -1
     private var referenceMachineDistanceMM: CGFloat?
     private var referenceZoom: CGFloat = 1
+    /// Where the cabinet sits in the gimbal-locked plane, in normalised
+    /// preview coordinates.  This, and not the newest detection, is what the
+    /// output camera aims at.
+    private var anchorCenter = CGPoint(x: 0.5, y: 0.5)
+    private var hasAnchor = false
+    private var offAnchorFrames = 0
+    /// Screen radius in ray-plane units at the moment the lock was taken, and
+    /// the zoom that goes with it.  Their ratio drives distance compensation.
+    private var anchorScreenRadiusPlane: Float = 0
+    private var hasAnchorRadius = false
+    private var anchorZoom: CGFloat = 1
+
+    /// Time constants for the two slow corrections.  The lock itself reacts
+    /// instantly (it is carried by the gyro); only the residual drift left
+    /// over by phone translation is allowed to move anything.
+    private static let anchorTimeConstant: Double = 2.2
+    private static let anchorDeadband: CGFloat = 0.006
+    private static let anchorEscape: CGFloat = 0.34
+    private static let anchorEscapeFrames = 30
+    private static let zoomDeadband: CGFloat = 0.02
+    private static let zoomRate: CGFloat = 0.12
+    private static let zoomRange: ClosedRange<CGFloat> = 0.90...2.20
     private var lastFramingTimestamp: TimeInterval?
     private var lastContourRefinementFrame = 0
     private var lastPublishedStatus: MachineGeometryLockStatus = .searching
@@ -499,8 +521,8 @@ final class MachineGeometryLockController: ObservableObject {
         let mappedOuter = mapRectified(outerTopLeft)
         let mappedInner = mapRectified(innerTopLeft)
         // The paired boxes cross-check the machine geometry: the inner box must
-        // remain inside the outer button frame, the inner screen defines the
-        // exact lock point, and the outer frame defines the crop and zoom.
+        // remain inside the outer button frame, and the inner screen defines the
+        // exact lock point.
         let rectifiedIntersection = mappedOuter.intersection(mappedInner)
         let rectifiedInnerArea = mappedInner.width * mappedInner.height
         guard !rectifiedIntersection.isNull,
@@ -510,6 +532,8 @@ final class MachineGeometryLockController: ObservableObject {
         }
         let cameraScreenCenter = detectedScreenEllipse.map { mapRectifiedPoint($0.center) }
             ?? CGPoint(x: mappedInner.midX, y: mappedInner.midY)
+        // Where the cabinet sits once the gyro has taken the phone's rotation
+        // out. This is the stable frame the lock lives in.
         let lockedCenter = lockedPoint(
             fromCameraPoint: cameraScreenCenter,
             transform: gimbalTransform
@@ -523,23 +547,58 @@ final class MachineGeometryLockController: ObservableObject {
             deltaTime = 1.0 / 30.0
         }
         lastFramingTimestamp = presentationTime.isFinite ? presentationTime : nil
-        // Keep enough filtering to suppress tracker noise without the visible
-        // follow-behind caused by the former 130/320 ms time constants.
-        let centerAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.045))
-        let zoomAlpha = CGFloat(1 - exp(-Double(deltaTime) / 0.12))
 
-        smoothedCenter = CGPoint(
-            x: smoothedCenter.x + (lockedCenter.x - smoothedCenter.x) * centerAlpha,
-            y: smoothedCenter.y + (lockedCenter.y - smoothedCenter.y) * centerAlpha
-        )
+        // The anchor *is* the framing. The gyro already takes the phone's
+        // rotation out, so a cabinet that is not being carried sideways keeps
+        // one ray in this plane no matter how the phone is waved. Re-aiming at
+        // every detector reading re-injected the detector's frame-to-frame
+        // wander into the crop, which is what made the 10-03 preview slide while
+        // the zoom swung between 0.72x and 3.20x. The newest measurement may
+        // only nudge the anchor with a two-second time constant, so translation
+        // is still followed and detector noise is not.
+        let anchorOffset = hasAnchor
+            ? hypot(lockedCenter.x - anchorCenter.x, lockedCenter.y - anchorCenter.y)
+            : 0
+        if !hasAnchor {
+            anchorCenter = lockedCenter
+            hasAnchor = true
+            offAnchorFrames = 0
+        } else if anchorOffset > Self.anchorEscape {
+            // The tracker has been reporting the cabinet nearly half a frame
+            // away from the anchor for about half a second: it has latched onto
+            // the wrong copy of the machine. Drop it and let the detector
+            // re-acquire around the real one.
+            offAnchorFrames += 1
+            if offAnchorFrames > Self.anchorEscapeFrames {
+                offAnchorFrames = 0
+                outerTrackingRequest = nil
+                innerTrackingRequest = nil
+                lastOuterBox = nil
+                lastInnerBox = nil
+                detectedScreenEllipse = nil
+                return false
+            }
+        } else {
+            offAnchorFrames = 0
+            if anchorOffset > Self.anchorDeadband {
+                let anchorAlpha = CGFloat(1 - exp(-Double(deltaTime) / Self.anchorTimeConstant))
+                anchorCenter.x += (lockedCenter.x - anchorCenter.x) * anchorAlpha
+                anchorCenter.y += (lockedCenter.y - anchorCenter.y) * anchorAlpha
+            }
+        }
+        smoothedCenter = anchorCenter
+
         let viewRotation = machineViewRotation(
-            aimingAt: smoothedCenter,
+            aimingAt: anchorCenter,
             previewSize: previewSize,
             horizontalFOV: settings.horizontalFOV
         )
 
-        // Rotate the virtual camera toward the screen-centre ray, then measure
-        // the outer ring in that new perspective view before choosing zoom.
+        // Measure the outer ring in the anchored view. The four border gaps
+        // stay in the readout as the physical 75 mm check, but they no longer
+        // drive the zoom: four box edges move several percent for a handful of
+        // detector pixels, and dividing the lock distance by their mean is what
+        // amplified that into the fourfold zoom swing.
         let correctedOuterBounds = projectedBounds(
             of: outerTopLeft,
             gimbalTransform: gimbalTransform,
@@ -550,16 +609,19 @@ final class MachineGeometryLockController: ObservableObject {
             gimbalTransform: gimbalTransform,
             viewRotation: viewRotation
         )
+        guard correctedOuterBounds.width.isFinite,
+              correctedOuterBounds.height.isFinite,
+              correctedOuterBounds.width > 0.02,
+              correctedOuterBounds.width < 3.2 else { return false }
+
+        // How much of the portrait frame the complete button ring takes up
+        // right now.  On the anchor frame this picks the fill zoom; later
+        // frames keep it as the reference and only follow the radius ratio.
         let targetSize = max(
             correctedOuterBounds.width,
-            correctedOuterBounds.height
-                * previewSize.height / max(previewSize.width, 1)
+            correctedOuterBounds.height * previewSize.height / max(previewSize.width, 1)
         )
-        guard targetSize.isFinite, targetSize > 0.025, targetSize < 3.2 else { return false }
 
-        // The measured 75 mm physical gap provides a local scale reference.
-        // Averaging all four projected borders reduces detector-box noise and
-        // estimates camera distance in the virtual pinhole view.
         let gapLeftPixels = max(correctedInnerBounds.minX - correctedOuterBounds.minX, 0)
             * previewSize.width
         let gapRightPixels = max(correctedOuterBounds.maxX - correctedInnerBounds.maxX, 0)
@@ -571,35 +633,17 @@ final class MachineGeometryLockController: ObservableObject {
         let meanGapPixels = (gapLeftPixels + gapRightPixels + gapTopPixels + gapBottomPixels) * 0.25
         let horizontalFOV = CGFloat(min(max(settings.horizontalFOV, 1), 179)) * .pi / 180
         let virtualFocalPixels = previewSize.width / (2 * tan(horizontalFOV * 0.5))
-        guard meanGapPixels.isFinite, meanGapPixels > 0.5,
-              virtualFocalPixels.isFinite, virtualFocalPixels > 0 else { return false }
-        let estimatedMachineDistanceMM = virtualFocalPixels * machineBorderGapMM / meanGapPixels
-        guard estimatedMachineDistanceMM.isFinite,
-              estimatedMachineDistanceMM >= 100,
-              estimatedMachineDistanceMM <= 20_000 else { return false }
-
-        if referenceMachineDistanceMM == nil {
-            referenceMachineDistanceMM = estimatedMachineDistanceMM
-            // Fill most of the portrait frame with the complete button ring on
-            // acquisition; the physical gap then drives distance compensation.
-            referenceZoom = min(max(0.84 / targetSize, 0.72), 3.2)
+        var estimatedMachineDistanceMM: CGFloat = 0
+        if meanGapPixels.isFinite, meanGapPixels > 0.5, virtualFocalPixels.isFinite {
+            estimatedMachineDistanceMM = virtualFocalPixels * machineBorderGapMM / meanGapPixels
         }
-        let distanceAtLock = max(referenceMachineDistanceMM ?? estimatedMachineDistanceMM, 1)
-        // A farther phone needs more digital zoom; a nearer phone needs less.
-        // The 75 mm gap converts measured image spacing to a metric distance.
-        let desiredZoom = min(max(
-            referenceZoom * estimatedMachineDistanceMM / distanceAtLock,
-            0.72
-        ), 3.2)
-        smoothedZoom += (desiredZoom - smoothedZoom) * zoomAlpha
-        let renderedGapScale = smoothedZoom * (gimbalTransform.gimbalActive ? 1.36 : 1)
 
-        // The screen ellipse and the 2x2 that turns it back into the circle
-        // it is on the real cabinet, both in the locked output plane — the
-        // plane the shader corrects in.  The detector reads the preview plane,
-        // so the view rotation that centres the screen has to be carried
-        // through first; skipping that leaves the correction tilted by however
-        // far off-centre the cabinet was when the lock caught it.
+        // The screen ellipse and the 2x2 that turns it back into the circle it
+        // is on the real cabinet, both in the locked output plane -- the plane
+        // the shader corrects in. The detector reads the preview plane, so the
+        // view rotation that centres the screen has to be carried through
+        // first; skipping that leaves the correction tilted by however far
+        // off-centre the cabinet was when the lock caught it.
         var shape = matrix_identity_float2x2
         var screenRadius: CGFloat = 0
         var screenRadiusPlane: Float = 0
@@ -624,15 +668,15 @@ final class MachineGeometryLockController: ObservableObject {
             )
             let centerPreview = mapRectifiedPoint(ellipse.center)
             let focal = plane.focal
-            if let lockedCenter = plane.lockedPlane(centerPreview),
+            if let lockedEllipseCenter = plane.lockedPlane(centerPreview),
                let lockedMajor = plane.lockedPlane(mapRectifiedPoint(majorSource)),
                let lockedMinor = plane.lockedPlane(mapRectifiedPoint(minorSource)) {
                 // Back to pixel-like units: the 2x2 is scale invariant, but the
                 // radius has to be comparable with the shader's focal.
-                let majorAxis = CGPoint(x: (lockedMajor.x - lockedCenter.x) * focal,
-                                        y: (lockedMajor.y - lockedCenter.y) * focal)
-                let minorAxis = CGPoint(x: (lockedMinor.x - lockedCenter.x) * focal,
-                                        y: (lockedMinor.y - lockedCenter.y) * focal)
+                let majorAxis = CGPoint(x: (lockedMajor.x - lockedEllipseCenter.x) * focal,
+                                        y: (lockedMajor.y - lockedEllipseCenter.y) * focal)
+                let minorAxis = CGPoint(x: (lockedMinor.x - lockedEllipseCenter.x) * focal,
+                                        y: (lockedMinor.y - lockedEllipseCenter.y) * focal)
                 shape = MachineRectifier.shape(majorAxis: majorAxis,
                                                minorAxis: minorAxis,
                                                strength: Double(rectifyStrength))
@@ -667,6 +711,34 @@ final class MachineGeometryLockController: ObservableObject {
             }
         }
 
+        // Distance compensation runs on the screen radius, the one measurement
+        // that tracks phone-to-machine distance instead of detector jitter. The
+        // anchor frame fixes both the reference radius and the zoom, and later
+        // frames only move the zoom by a dead-banded, rate-limited fraction of
+        // the radius ratio, so a one-pixel radius wobble cannot snap the crop.
+        if !hasAnchorRadius, screenRadiusPlane > 0 {
+            // Fit the full button ring into the portrait frame, then
+            // freeze that as the reference the radius ratio scales.
+            if targetSize.isFinite, targetSize > 0.05, targetSize < 3.2 {
+                smoothedZoom = min(max(0.84 / targetSize, Self.zoomRange.lowerBound),
+                                    Self.zoomRange.upperBound)
+            }
+            anchorScreenRadiusPlane = screenRadiusPlane
+            anchorZoom = smoothedZoom
+            hasAnchorRadius = true
+        }
+        if hasAnchorRadius, anchorScreenRadiusPlane > 0, screenRadiusPlane > 0 {
+            let ratio = anchorScreenRadiusPlane / screenRadiusPlane
+            let target = anchorZoom * ratio
+            let delta = target - smoothedZoom
+            if abs(delta) > Self.zoomDeadband, delta.isFinite {
+                let maxStep = max(Self.zoomRate * CGFloat(deltaTime) * 30.0, Self.zoomRate)
+                smoothedZoom += max(min(delta, maxStep), -maxStep)
+            }
+        }
+        smoothedZoom = min(max(smoothedZoom, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
+        let renderedGapScale = smoothedZoom * (gimbalTransform.gimbalActive ? 1.36 : 1)
+
         let flatness = detectedScreenEllipse.map {
             Float($0.minorRadius / max($0.majorRadius, 0.001))
         } ?? 0
@@ -695,7 +767,8 @@ final class MachineGeometryLockController: ObservableObject {
                 * previewSize.height * renderedGapScale,
             bottomGap: max(correctedOuterBounds.maxY - correctedInnerBounds.maxY, 0)
                 * previewSize.height * renderedGapScale,
-            estimatedMachineDistanceMM: estimatedMachineDistanceMM,
+            estimatedMachineDistanceMM: estimatedMachineDistanceMM > 0
+                ? estimatedMachineDistanceMM : nil,
             // The shader rebuilds this as float2x2(float2(x, y), float2(z, w)),
             // i.e. column major, so the two column vectors go in order.
             rectifyShape: SIMD4<Float>(shape.columns.0.x, shape.columns.0.y,
@@ -737,12 +810,19 @@ final class MachineGeometryLockController: ObservableObject {
         lastDetectionPresentationTime = nil
         lastSuccessfulTrackingTime = nil
         lastContourRefinementFrame = 0
+        anchorCenter = CGPoint(x: 0.5, y: 0.5)
         smoothedCenter = CGPoint(x: 0.5, y: 0.5)
+        hasAnchor = false
+        offAnchorFrames = 0
+        anchorScreenRadiusPlane = 0
+        hasAnchorRadius = false
+        anchorZoom = 1
         smoothedZoom = 1
         hasRingFit = false
         smoothedRingCosine = SIMD4<Float>(MachineRectifier.tileRatio, 0, 0, 0)
         smoothedRingSine = .zero
         detectedScreenEllipse = nil
+        hasAnchorRadius = false
         referenceMachineDistanceMM = nil
         referenceZoom = 1
         lastFramingTimestamp = nil
