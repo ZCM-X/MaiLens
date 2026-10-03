@@ -191,9 +191,16 @@ struct ContentView: View {
                 }
             }
 
-            Text(camera.cameraName)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.48))
+            HStack(spacing: 8) {
+                Text(camera.cameraName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.48))
+                Spacer(minLength: 8)
+                Text(AppVersion.display)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .accessibilityLabel("版本 \(AppVersion.display)")
+            }
         }
         .padding(14)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 26))

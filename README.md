@@ -5,6 +5,8 @@ MaiLens is an iPhone app for a clip-on fisheye lens on the iPhone 15 Pro Max 0.5
 ## What is implemented
 
 - Live 1080p preview from the iPhone rear ultra-wide camera. The app requests camera permission at launch.
+- Build stamp in the corner under the preview: `v<MARKETING_VERSION> (<CURRENT_PROJECT_VERSION>)`, read from the
+  bundle so the number on screen always matches the build that is installed. Bump both in `project.yml`.
 - Metal inverse mapping for the OpenCV fisheye angle model: `theta_d = theta * (1 + k1*theta^2 + k2*theta^4)`.
 - Manual controls for lens center X/Y, `k1`, `k2`, output field of view, lens half field of view, image-circle ratio, and an on/off correction switch.
 - A bundled clip-on fisheye profile with defaults of 103° horizontal output FOV, 69° lens half-FOV, and a 1.15× image circle relative to the input's short side. Lens values persist locally and are included in exported lens profiles.
