@@ -60,3 +60,20 @@ jobs:
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The job log needs repository admin to download, but check annotations
+      # are public. Surface every compiler error as one so the failure can be
+      # read from the API without a login.
+      - name: Publish compiler errors as annotations
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/typecheck.log" ]; then
+            grep -E "error:" "$RUNNER_TEMP/typecheck.log" | head -n 25 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          if [ -s "$RUNNER_TEMP/metal.log" ]; then
+            grep -E "error:" "$RUNNER_TEMP/metal.log" | head -n 10 | while IFS= read -r line; do
+              echo "::error::metal: $line"
+            done
+          fi

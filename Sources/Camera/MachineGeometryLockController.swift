@@ -728,7 +728,7 @@ final class MachineGeometryLockController: ObservableObject {
             hasAnchorRadius = true
         }
         if hasAnchorRadius, anchorScreenRadiusPlane > 0, screenRadiusPlane > 0 {
-            let ratio = anchorScreenRadiusPlane / screenRadiusPlane
+            let ratio = CGFloat(anchorScreenRadiusPlane / screenRadiusPlane)
             let target = anchorZoom * ratio
             let delta = target - smoothedZoom
             if abs(delta) > Self.zoomDeadband, delta.isFinite {
@@ -753,6 +753,9 @@ final class MachineGeometryLockController: ObservableObject {
             }
         }
 
+        var distanceForReadout: CGFloat? = nil
+        if estimatedMachineDistanceMM > 0 { distanceForReadout = estimatedMachineDistanceMM }
+
         let current = MachineGeometryFraming(
             center: smoothedCenter,
             zoom: smoothedZoom,
@@ -767,8 +770,7 @@ final class MachineGeometryLockController: ObservableObject {
                 * previewSize.height * renderedGapScale,
             bottomGap: max(correctedOuterBounds.maxY - correctedInnerBounds.maxY, 0)
                 * previewSize.height * renderedGapScale,
-            estimatedMachineDistanceMM: estimatedMachineDistanceMM > 0
-                ? estimatedMachineDistanceMM : nil,
+            estimatedMachineDistanceMM: distanceForReadout,
             // The shader rebuilds this as float2x2(float2(x, y), float2(z, w)),
             // i.e. column major, so the two column vectors go in order.
             rectifyShape: SIMD4<Float>(shape.columns.0.x, shape.columns.0.y,
